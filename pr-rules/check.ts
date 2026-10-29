@@ -16,8 +16,8 @@
 import { appendFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
-import { releaseFromGitHub } from '../release-pr/github.ts';
-import { checkBody } from '../release-pr/release.ts';
+import { openPullRequests, releaseFromGitHub } from '../release-pr/github.ts';
+import { checkBody, linkedToOpenPullRequests } from '../release-pr/release.ts';
 import { brokenRules, kindOf, MAIN, PREFIXES, TEAM_KEYS, type PullRequest, type Rules } from './rules.ts';
 
 function fail(message: string): never {
@@ -68,6 +68,10 @@ async function releaseRules(pr: PullRequest, rules: Rules, repo: string | null):
     fail(`${error instanceof Error ? error.message : String(error)}. In Actions, the job needs contents: read and pull-requests: read.`),
   );
   const { missing, extra } = checkBody(release, pr.body, rules.teamKeys);
+  const open = await openPullRequests(repo, token).catch((error: unknown) =>
+    fail(`${error instanceof Error ? error.message : String(error)}. In Actions, the job needs pull-requests: read.`),
+  );
+  const stuck = linkedToOpenPullRequests(release, open, rules.teamKeys);
   const numbers = (pullRequests: number[]) => pullRequests.map((n) => `#${n}`).join(', ');
   return {
     broken: missing.map(
@@ -75,7 +79,14 @@ async function releaseRules(pr: PullRequest, rules: Rules, repo: string | null):
         `Body — the release does not complete ${issue.id}, which ${numbers(issue.pullRequests)} finishes. Add "Completes ${issue.id}": ` +
         `only the merge to ${MAIN} moves it to Done. release-pr/draft.ts in the toolkit writes the whole body.`,
     ),
-    warnings: extra.map((id) => `Body — the release completes ${id}, and no pull request in it finishes that issue. Leave it only if it ships with this release.`),
+    warnings: [
+      ...extra.map((id) => `Body — the release completes ${id}, and no pull request in it finishes that issue. Leave it only if it ships with this release.`),
+      ...stuck.map(
+        (issue) =>
+          `Linear — ${issue.id} is also linked to ${numbers(issue.pullRequests)}, still open, so this release will not move it to Done. ` +
+          `Merge or close ${numbers(issue.pullRequests)} first, or take ${issue.id} out of it.`,
+      ),
+    ],
   };
 }
 

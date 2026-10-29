@@ -5,7 +5,7 @@
  */
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { MAIN, pullRequestNumbers, releaseOf, type MergedPullRequest, type Release } from './release.ts';
+import { MAIN, pullRequestNumbers, releaseOf, type MergedPullRequest, type OpenPullRequest, type Release } from './release.ts';
 
 /** A read of GitHub's REST API. A 5xx is retried; anything else is an error that names the path, never the token. */
 export async function github(path: string, token: string): Promise<unknown> {
@@ -90,4 +90,16 @@ export async function pullRequestsOfRelease(repo: string, number: number, gate: 
   const numbers = pullRequestNumbers(messages).filter((found) => found !== number);
   const pullRequests = await Promise.all(numbers.map((found) => mergedPullRequest(repo, found, token)));
   return releaseOf(gate, null, pullRequests.filter((pr) => pr !== null), []).rows;
+}
+
+/** The repo's open pull requests. */
+export async function openPullRequests(repo: string, token: string): Promise<OpenPullRequest[]> {
+  const open: OpenPullRequest[] = [];
+  for (let page = 1; ; page += 1) {
+    const pulls = asList(await github(`/repos/${repo}/pulls?state=open&per_page=100&page=${page}`, token), 'the open pull requests of a repo') as RawPullRequest[];
+    for (const pr of pulls) {
+      if (typeof pr.number === 'number') open.push({ number: pr.number, title: pr.title ?? '', body: pr.body ?? '', base: pr.base?.ref ?? '', head: pr.head?.ref ?? '' });
+    }
+    if (pulls.length < 100) return open;
+  }
 }

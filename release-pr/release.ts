@@ -163,3 +163,32 @@ export function compareWithInTest(release: Release, team: string, inTestState: s
     notReleased: inTest.filter((issue) => !released.has(issue.id)).sort((a, b) => byIssue(a.id, b.id)),
   };
 }
+
+/** A pull request still open, as GitHub has it. */
+export interface OpenPullRequest {
+  number: number;
+  title: string;
+  body: string;
+  base: string;
+  head: string;
+}
+
+/**
+ * The issues the release completes that an open pull request also links: by a
+ * magic word in its body, or by the ID in its title or branch, as Linear links
+ * them. Linear moves no issue on a merge while a pull request linked to it is
+ * still open, not even one that only says «Part of»: Control Tower's DEV-401
+ * stayed In Test after release #334 because #337 was open. The release itself
+ * is left out.
+ */
+export function linkedToOpenPullRequests(release: Release, open: readonly OpenPullRequest[], teamKeys: readonly string[]): ReleaseIssue[] {
+  const others = open.filter((pr) => !(pr.head === release.gate && pr.base === MAIN));
+  return release.completes.flatMap((issue) => {
+    const named = new RegExp(`(?:^|[^a-z0-9])${issue.id}(?![0-9])`, 'i');
+    const linking = others.filter((pr) => {
+      const links = issueLinks(pr.body, teamKeys);
+      return links.closes.includes(issue.id) || links.refs.includes(issue.id) || named.test(pr.title) || named.test(pr.head);
+    });
+    return linking.length === 0 ? [] : [{ id: issue.id, pullRequests: linking.map((pr) => pr.number).sort((a, b) => a - b) }];
+  });
+}
