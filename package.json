@@ -1,0 +1,17 @@
+{
+  "name": "always-chasing-toolkit",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc",
+    "test": "node --disable-warning=ExperimentalWarning --test lib/*.test.ts deploy-notice/*.test.ts health-watch/*.test.ts",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "^5.9.3"
+  }
+}

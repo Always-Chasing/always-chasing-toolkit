@@ -1,0 +1,92 @@
+# Tells Slack what happened to a deploy of `test` or production of a project on
+# Vercel and Supabase: whether Vercel built it, whether Supabase applied the
+# migrations of that commit, and whether the environment's domain already
+# serves it. The rules that pick the notice are in notice.ts; the questions, in
+# notify.ts; how a project sets it up, in the README.
+#
+# To edit it: actions pinned to a full commit SHA with the version beside it,
+# and every input reaches the script as environment, never as part of a
+# command.
+name: Deploy notice
+description: Tells Slack whether a deploy of test or production on Vercel and Supabase went live, and why not when it did not.
+author: Always Chasing
+
+inputs:
+  project:
+    description: The project's name. Every message starts with it.
+    required: true
+  webhook-url:
+    description: The Slack incoming webhook, from a secret.
+    required: true
+  production-url:
+    description: The production domain, such as https://example.com.
+    required: true
+  test-url:
+    description: The test domain, if the project has one. Without it, test deploys are left alone.
+    required: false
+    default: ''
+  production-environment:
+    description: The GitHub environment Vercel reports production under.
+    required: false
+    default: Production
+  test-environment:
+    description: The GitHub environment Vercel reports test under.
+    required: false
+    default: staging
+  probe-path:
+    description: A page that answers on every host without a session, to read which deployment a domain serves.
+    required: false
+    default: /
+  supabase-check:
+    description: The check run Supabase reports the migrations of a commit with.
+    required: false
+    default: Supabase Preview
+  release-branch:
+    description: The branch whose merges reach production.
+    required: false
+    default: main
+  migrations-wait-minutes:
+    description: How long to wait for Supabase before calling the migrations stalled. Match the Vercel Deployment Check, if production has one.
+    required: false
+    default: '30'
+  deployment-id:
+    description: A deployment to tell about, instead of the one that started the run.
+    required: false
+    default: ''
+  release-sha:
+    description: A release to watch, instead of the push that started the run.
+    required: false
+    default: ''
+  dry-run:
+    description: true prints the notice without posting it.
+    required: false
+    default: 'false'
+  github-token:
+    description: Reads the repo's deployments, check runs and commit statuses.
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: 24
+    - name: Tell Slack
+      shell: bash
+      run: node --disable-warning=ExperimentalWarning "$GITHUB_ACTION_PATH/notify.ts"
+      env:
+        PROJECT: ${{ inputs.project }}
+        SLACK_WEBHOOK_URL: ${{ inputs.webhook-url }}
+        PRODUCTION_URL: ${{ inputs.production-url }}
+        TEST_URL: ${{ inputs.test-url }}
+        PRODUCTION_ENVIRONMENT: ${{ inputs.production-environment }}
+        TEST_ENVIRONMENT: ${{ inputs.test-environment }}
+        PROBE_PATH: ${{ inputs.probe-path }}
+        SUPABASE_CHECK: ${{ inputs.supabase-check }}
+        RELEASE_BRANCH: ${{ inputs.release-branch }}
+        MIGRATIONS_WAIT_MINUTES: ${{ inputs.migrations-wait-minutes }}
+        DEPLOYMENT_ID: ${{ inputs.deployment-id || github.event.deployment.id }}
+        RELEASE_SHA: ${{ inputs.release-sha || (github.event_name == 'push' && github.sha) || '' }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}

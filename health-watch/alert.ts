@@ -1,0 +1,171 @@
+/**
+ * What the health watch tells Slack: a project's `/api/health` read every
+ * half hour, a message when a check starts failing, and a reminder every 6
+ * hours while it keeps failing. Pure: `watch.ts` fetches, posts and keeps the
+ * state.
+ *
+ * The route is the project's, and it answers one of two ways:
+ *
+ *   200 {"status":"ok"}
+ *   503 {"status":"failing","failing":[{"code":"queue_stuck","since":"2026-10-27T15:05:00.000Z"}]}
+ *
+ * `since` is optional. Anything else — another status, a body that is not the
+ * report, no answer at all — is production not answering, and that is a
+ * failure of its own, `unreachable`. The words for each code are the
+ * project's, in a file of its own; what the message carries is the codes,
+ * since when, and where the detail is, never data.
+ */
+
+import { escape, headed } from '../lib/slack.ts';
+
+/** The watch's own code: the route did not answer, or not with its report. */
+export const UNREACHABLE = 'unreachable';
+
+/** What a code looks like: the words of the message may quote it, so nothing else gets through. */
+const CODE = /^[a-z_]{1,60}$/;
+
+export interface FailingCheck {
+  code: string;
+  /** When it started failing, as the route says it; null when nothing says. */
+  since: string | null;
+}
+
+/** What one read of the route said. */
+export type HealthRead = { kind: 'ok' } | { kind: 'failing'; failing: FailingCheck[] };
+
+/** The route's answer, as the watch takes it. */
+export function readHealth(status: number | null, body: unknown): HealthRead {
+  const unreachable: HealthRead = { kind: 'failing', failing: [{ code: UNREACHABLE, since: null }] };
+  if (status === null || typeof body !== 'object' || body === null) return unreachable;
+  const report = body as { status?: unknown; failing?: unknown };
+  if (status === 200 && report.status === 'ok') return { kind: 'ok' };
+  if (status !== 503 || report.status !== 'failing' || !Array.isArray(report.failing)) return unreachable;
+  const failing = report.failing.flatMap((entry: unknown): FailingCheck[] => {
+    if (typeof entry !== 'object' || entry === null) return [];
+    const { code, since } = entry as { code?: unknown; since?: unknown };
+    return typeof code === 'string' && CODE.test(code) ? [{ code, since: typeof since === 'string' ? since : null }] : [];
+  });
+  return failing.length === 0 ? unreachable : { kind: 'failing', failing };
+}
+
+/**
+ * The project's words for its codes, from its checks file: an object of code
+ * to one sentence. Throws on anything else, so a broken file fails the run
+ * instead of turning every alert into codes nobody explained.
+ */
+export function readChecks(raw: unknown): Readonly<Record<string, string>> {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new Error('the checks file is not an object of code to words');
+  const words: Record<string, string> = {};
+  for (const [code, sentence] of Object.entries(raw)) {
+    if (!CODE.test(code)) throw new Error(`"${code}" is not a code: lowercase letters and underscores, up to 60`);
+    if (typeof sentence !== 'string' || sentence.trim() === '') throw new Error(`the code ${code} has no words`);
+    words[code] = sentence.trim();
+  }
+  return words;
+}
+
+/** What the watch remembers between runs: when it last told Slack of each code that is failing. */
+export interface WatchState {
+  told: Record<string, string>;
+}
+
+export const EMPTY_STATE: WatchState = { told: {} };
+
+/** How often a check that keeps failing is told again. */
+export const REMIND_AFTER_MS = 6 * 60 * 60_000;
+
+/** The state as the cache brought it back, or empty when there is none or it is not one. */
+export function readState(raw: unknown): WatchState {
+  if (typeof raw !== 'object' || raw === null) return EMPTY_STATE;
+  const told = (raw as { told?: unknown }).told;
+  if (typeof told !== 'object' || told === null) return EMPTY_STATE;
+  const entries = Object.entries(told).filter((entry): entry is [string, string] => typeof entry[1] === 'string' && !Number.isNaN(Date.parse(entry[1])));
+  return { told: Object.fromEntries(entries) };
+}
+
+export interface Decision {
+  /** Failing now, and not when the watch last looked. */
+  started: FailingCheck[];
+  /** Still failing, told 6 hours ago or more. */
+  reminded: FailingCheck[];
+  /** What to remember for the next run: a code that stopped failing is forgotten, so failing again is news. */
+  next: WatchState;
+}
+
+export function decide(read: HealthRead, state: WatchState, now: Date): Decision {
+  const failing = read.kind === 'ok' ? [] : read.failing;
+  const started: FailingCheck[] = [];
+  const reminded: FailingCheck[] = [];
+  const told: Record<string, string> = {};
+  for (const check of failing) {
+    const last = state.told[check.code];
+    if (last === undefined) {
+      started.push(check);
+      told[check.code] = now.toISOString();
+    } else if (now.getTime() - Date.parse(last) >= REMIND_AFTER_MS) {
+      reminded.push(check);
+      told[check.code] = now.toISOString();
+    } else {
+      told[check.code] = last;
+    }
+  }
+  return { started, reminded, next: { told } };
+}
+
+/** Everything a message needs besides what failed. */
+export interface Context {
+  project: string;
+  /** The origin the watch read, such as https://example.com. */
+  origin: string;
+  healthPath: string;
+  /** The project's words for its codes. */
+  words: Readonly<Record<string, string>>;
+  /** Where the detail is, behind the project's session, such as /diagnostics; null when the project has none. */
+  detailsPath: string | null;
+  /** The zone the times are told in, such as America/Mexico_City. */
+  timeZone: string;
+}
+
+/** One check: its code, since when in parentheses, and what it means. */
+function line(check: FailingCheck, context: Context): string {
+  const words =
+    context.words[check.code] ??
+    (check.code === UNREACHABLE ? `Production does not answer: ${context.healthPath} did not respond as it should.` : 'A check this watch does not know.');
+  const when = new Intl.DateTimeFormat('en-US', {
+    timeZone: context.timeZone,
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  });
+  const since = check.since === null || Number.isNaN(Date.parse(check.since)) ? '' : ` (since ${when.format(new Date(check.since))})`;
+  return `• \`${check.code}\`${since}: ${escape(words)}`;
+}
+
+const count = (checks: readonly FailingCheck[], one: string, many: string) => (checks.length === 1 ? one : many.replace('#', String(checks.length)));
+
+/** What a test posts: proof that a message reaches the channel, saying it is one. */
+export function testText(project: string): string {
+  return headed(project, '🧪 *Health watch test*: this is how an alert reaches this channel. Nothing is failing.');
+}
+
+/**
+ * The message, in Slack's own markup, or null when there is nothing to tell.
+ * What started failing goes first, then what keeps failing, then where the
+ * detail is.
+ */
+export function alertText(decision: Pick<Decision, 'started' | 'reminded'>, context: Context): string | null {
+  if (decision.started.length === 0 && decision.reminded.length === 0) return null;
+  const parts: string[] = [];
+  if (decision.started.length > 0) {
+    parts.push(`🚨 *Production: ${count(decision.started, 'a check started failing', '# checks started failing')}*`, ...decision.started.map((check) => line(check, context)));
+  }
+  if (decision.reminded.length > 0) {
+    if (parts.length > 0) parts.push('');
+    parts.push(`⏰ *Production: ${count(decision.reminded, 'a check is still failing', '# checks are still failing')}*`, ...decision.reminded.map((check) => line(check, context)));
+  }
+  if (context.detailsPath !== null) parts.push('', `The detail, with its ids, is at <${context.origin}${context.detailsPath}|${escape(context.detailsPath)}>.`);
+  parts[0] = headed(context.project, parts[0] ?? '');
+  return parts.join('\n');
+}

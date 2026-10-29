@@ -1,0 +1,93 @@
+# Watches a project's production from outside it: reads its /api/health, tells
+# Slack when a check starts failing, and reminds every 6 hours while it keeps
+# failing. It still speaks when the whole application is down: no answer, or an
+# answer that is not the report, is a failure of its own. The words for each
+# code come from the project's checks file; the rules, from alert.ts; how a
+# project sets it up, from the README.
+#
+# What it last told lives in the Actions cache, its only memory between runs:
+# each watch restores the newest state and saves its own. A lost cache only
+# means telling a failure again.
+#
+# To edit it: actions pinned to a full commit SHA with the version beside it,
+# and every input reaches the script as environment, never as part of a
+# command.
+name: Health watch
+description: Reads a project's /api/health and tells Slack when a check starts failing, and every 6 hours while it keeps failing.
+author: Always Chasing
+
+inputs:
+  project:
+    description: The project's name. Every message starts with it.
+    required: true
+  webhook-url:
+    description: The Slack incoming webhook, from a secret.
+    required: true
+  production-url:
+    description: The production domain, such as https://example.com. A watch reads only this one.
+    required: true
+  checks-file:
+    description: The project's words for its codes, a JSON object of code to one sentence, in the workspace.
+    required: true
+  health-path:
+    description: The route that reports the checks.
+    required: false
+    default: /api/health
+  details-path:
+    description: Where the detail is, behind the project's session, such as /diagnostics. Left out of the message when empty.
+    required: false
+    default: ''
+  time-zone:
+    description: The zone the times of a message are told in.
+    required: false
+    default: UTC
+  mode:
+    description: watch reads production and tells what is new; dry-run prints both messages without posting; test posts a test alert.
+    required: false
+    default: watch
+  dry-run-url:
+    description: What a dry run reads instead of production — one of allowed-urls, a Vercel preview or localhost.
+    required: false
+    default: ''
+  allowed-urls:
+    description: Other origins a dry run may read, such as the test domain, separated by spaces.
+    required: false
+    default: ''
+  state-key:
+    description: The prefix of the cache that holds what the watch told; one per watch in a repo.
+    required: false
+    default: health-watch
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: 24
+    - if: inputs.mode == 'watch'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .health-watch
+        key: ${{ inputs.state-key }}-${{ github.run_id }}
+        restore-keys: ${{ inputs.state-key }}-
+    - name: Read production and tell Slack
+      shell: bash
+      run: node --disable-warning=ExperimentalWarning "$GITHUB_ACTION_PATH/watch.ts"
+      env:
+        PROJECT: ${{ inputs.project }}
+        SLACK_WEBHOOK_URL: ${{ inputs.webhook-url }}
+        PRODUCTION_URL: ${{ inputs.production-url }}
+        CHECKS_FILE: ${{ inputs.checks-file }}
+        HEALTH_PATH: ${{ inputs.health-path }}
+        DETAILS_PATH: ${{ inputs.details-path }}
+        TIME_ZONE: ${{ inputs.time-zone }}
+        MODE: ${{ inputs.mode }}
+        DRY_RUN_URL: ${{ inputs.dry-run-url }}
+        ALLOWED_URLS: ${{ inputs.allowed-urls }}
+        STATE_FILE: .health-watch/state.json
+    # Only a watch remembers what it told; a dry run and a test tell nobody.
+    - if: inputs.mode == 'watch'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .health-watch
+        key: ${{ inputs.state-key }}-${{ github.run_id }}
