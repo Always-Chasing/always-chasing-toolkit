@@ -12,10 +12,10 @@ describe('the issues a body links', () => {
   });
 
   it('reads every form of every word', () => {
-    for (const word of ['Close', 'Closes', 'Closed', 'Closing', 'Fix', 'Fixes', 'Fixed', 'Fixing', 'Resolve', 'Resolves', 'Resolved', 'Resolving', 'Complete', 'Completes', 'Completed', 'Completing']) {
+    for (const word of ['Close', 'Closes', 'Closed', 'Closing', 'Fix', 'Fixes', 'Fixed', 'Fixing', 'Resolve', 'Resolves', 'Resolved', 'Resolving', 'Complete', 'Completes', 'Completed', 'Completing', 'Implement', 'Implements', 'Implemented', 'Implementing']) {
       assert.deepEqual(issueLinks(`${word} DEV-1`, keys).closes, ['DEV-1'], word);
     }
-    for (const word of ['Ref', 'Refs', 'References', 'Part of', 'Related to', 'Contributes to', 'Toward', 'Towards']) {
+    for (const word of ['Ref', 'Refs', 'References', 'Part of', 'Related to', 'Contributes to', 'Toward', 'Towards', 'Updates']) {
       assert.deepEqual(issueLinks(`${word} DEV-1`, keys).refs, ['DEV-1'], word);
     }
   });
