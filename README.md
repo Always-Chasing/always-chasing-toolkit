@@ -6,7 +6,7 @@ and Supabase, and the check that keeps every pull request within the Git convent
 | Action | What it does |
 |---|---|
 | [`deploy-notice`](deploy-notice/action.yml) | Tells whether a deploy of `test` or production went live: Vercel's build, Supabase's migrations, and whether the domain already serves the new version. When it did not go live, it says why |
-| [`health-watch`](health-watch/action.yml) | Tells what started failing in production, read from the project's `/api/health` every half hour, and reminds every 6 hours while it keeps failing. It also speaks when production does not answer at all |
+| [`health-watch`](health-watch/action.yml) | Tells what started failing in production, read from the project's `/api/health` every half hour, reminds every 6 hours while it keeps failing, and says when it works again. It also speaks when production does not answer at all |
 | [`pr-rules`](pr-rules/action.yml) | Fails a pull request whose title, branch, base or link to Linear breaks the conventions, and says how to fix it. A release must complete every issue it releases |
 
 And one command, [`release-pr`](release-pr/draft.ts), that drafts the release pull request of a
@@ -15,7 +15,27 @@ issue, compared with the issues in In Test.
 
 Both alerts post to `#alerts`, the private channel of the «Always Chasing» Slack, through one
 app, Mr.Chase. All the projects post through the same app, so **every message starts with the
-project's name**. The messages are in English.
+project's name**. The messages are in English, and all have the same shape, made to be read at a
+glance:
+
+```text
+Control Tower · production updated                 ← the title: only what happened
+┃ ✅ Code built → ✅ Database updated → ✅ Site live  ← the steps, as a line of icons
+┃ Release  #334 Release the panel's new frame…       ← a table of two columns
+┃ Commit   ac0b48c
+┃ What's new (5)                                     ← a list, when there is one
+┃ • #328 Give every panel module one layout…
+┃ Open production                                    ← where to look next
+```
+
+| Color bar | When |
+|---|---|
+| Blue | `test` is ready to try |
+| Green | Production took a release, or got well again |
+| Red | A deploy failed or got stuck: the table says what happened and what to do |
+| Amber | Production has a problem: one row per failing check, since when and what it means |
+
+A step that failed shows ❌, the ones it held back ⏸, and one still running ⏳.
 
 The repo is public, and holds nothing but code: the webhook lives in each organization's
 secrets, never here. Being public is what lets every project use it as it uses any other action:
@@ -96,6 +116,7 @@ jobs:
       contents: read
       checks: read
       deployments: read
+      pull-requests: read
     steps:
       - uses: Always-Chasing/always-chasing-toolkit/deploy-notice@<full SHA of the version> # v1.2.0
         with:
@@ -116,6 +137,7 @@ jobs:
       contents: read
       checks: read
       statuses: read
+      pull-requests: read
     steps:
       - uses: Always-Chasing/always-chasing-toolkit/deploy-notice@<full SHA of the version> # v1.2.0
         with:
@@ -131,20 +153,30 @@ published or held back. The deploy notice starts with that report. The release w
 with the merge to `main`, so a release whose wait never ends is still heard of. It speaks only
 when the deploy notice cannot.
 
-Without `test-url`, `test` deploys are left alone. The other inputs, with their defaults, are in
-[`deploy-notice/action.yml`](deploy-notice/action.yml). The notices themselves are in
-[`deploy-notice/notice.ts`](deploy-notice/notice.ts):
+Without `test-url`, `test` deploys are left alone. A project whose gate is not called `test`
+sets `test-branch` (ECO: `staging`): the messages call it by that name, and a release is a pull
+request from it. The other inputs, with their defaults, are in
+[`deploy-notice/action.yml`](deploy-notice/action.yml).
 
-| Notice | What happened |
-|---|---|
-| ✅ `test` ready | The code and the database of `test` are both there |
-| ✅ Production published | The domain serves the new version; lists the pull requests since the previous release |
-| 🚨 Deploy failed | Vercel could not build it; the environment is still on the previous version |
-| 🚨 Migrations failed | Supabase could not apply them. Production published nothing; in `test`, the new code is live over the old schema |
-| 🚨 Buckets failed | Supabase applied the migrations, but not the buckets of `supabase/config.toml` |
-| 🚨 Supabase's check failed | A step the notice does not recognize failed, so it says nothing of the migrations |
-| 🚨 Production held back | Supabase has not finished within the wait, and Vercel does not publish until it does |
-| 🚨 Not published | The migrations finished, and minutes later the domain still serves another version |
+**Each notice names the pull request behind it, read from GitHub**: the change that entered
+`test`, or the release that reached production and every pull request it brought, as its own
+table lists them. That reading needs `pull-requests: read`; without it, a notice still goes out,
+naming the commit instead. Vercel may report the same deployment twice: only the first report of
+each state is told. The notices themselves are in [`deploy-notice/notice.ts`](deploy-notice/notice.ts):
+
+| Title | Steps | What happened |
+|---|---|---|
+| test is ready to try | ✅ ✅ ✅ | The code and the database of `test` are both there |
+| production updated | ✅ ✅ ✅ | The domain serves the new version; lists what the release brought |
+| the … build failed | ❌ ⏸ | Vercel could not build it; the environment is still on the previous version |
+| the … database update failed | ✅ ❌ ⏸ | Supabase could not apply the migrations. Production published nothing; in `test`, the new code is live over the old schema |
+| the … storage buckets failed | ✅ ✅ ❌ ⏸ | Supabase applied the migrations, but not the buckets of `supabase/config.toml` |
+| Supabase's check failed for … | ✅ ❌ ⏸ | A step the notice does not recognize failed, so it says nothing of the migrations |
+| production deploy is stuck | ✅ ⏳ ⏸ | Supabase has not finished within the wait, and Vercel does not publish until it does |
+| … did not go live | ✅ ✅ ❌ | The migrations finished, and minutes later the domain still serves another version |
+
+In `test` nothing waits for the migrations, so where production shows ⏸ Site held back, `test`
+shows ✅ Site live: the new code is there over whatever the database has.
 
 ### 3. Add the health watch
 
@@ -221,9 +253,9 @@ jobs:
           dry-run-url: ${{ inputs.url }}
 ```
 
-- **It tells what starts failing, and reminds every 6 hours while it keeps failing.** What
-  stopped failing is forgotten: if it comes back, it is news again. It does not tell when
-  something gets fixed.
+- **It tells what starts failing, reminds every 6 hours while it keeps failing, and tells when
+  it works again**, in green: «production is back to normal». What stopped failing is then
+  forgotten: if it comes back, it is news again.
 - **Its memory is the Actions cache**: what it last told of each code, in a file each watch
   restores and saves under its own key. If the cache is lost, it only repeats an alert.
 - **A watch reads production and nothing else.** A dry run may also read `allowed-urls`, a
@@ -237,12 +269,13 @@ time zone of the times in a message (`time-zone`).
 
 ### 4. Try it
 
-From GitHub, *Actions → Health watch → Run workflow*: `dry-run` prints both messages for what
-fails at the given address, `test` posts a test alert to `#alerts`, and `watch` runs as the
+From GitHub, *Actions → Health watch → Run workflow*: `dry-run` prints the three messages for
+what fails at the given address —when it starts, 6 hours on, and when it works again—, `test` posts a test alert to `#alerts`, and `watch` runs as the
 schedule. *Actions → Deploy notices → Run workflow* tells about the deployment whose id it is
 given: as a dry run, the notice is in the run's summary; without it, it posts to `#alerts`.
 
-From a checkout of this repo, nothing is posted:
+From a checkout of this repo, nothing is posted. `--payload` also prints what would go to Slack,
+which [Block Kit Builder](https://app.slack.com/block-kit-builder) draws as the channel would:
 
 ```bash
 GITHUB_TOKEN="$(gh auth token)" PROJECT=Example PRODUCTION_URL=https://example.com TEST_URL=https://test.example.com \

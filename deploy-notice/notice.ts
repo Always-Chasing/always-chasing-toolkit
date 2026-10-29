@@ -19,7 +19,8 @@
  * branch and speaks only for what the deploy notice cannot.
  */
 
-import { escape, headed, link } from '../lib/slack.ts';
+import { summaryOf } from '../lib/conventional.ts';
+import { escape, link, titled, type Field, type Message, type Step } from '../lib/slack.ts';
 
 export type DeployEnvironment = 'production' | 'test';
 
@@ -41,6 +42,18 @@ export function buildOutcome(state: string): 'ready' | 'failed' | null {
   if (state === 'success') return 'ready';
   if (state === 'failure' || state === 'error') return 'failed';
   return null;
+}
+
+/**
+ * Whether a final status repeats one the deployment already had. Vercel may
+ * report a deployment twice — Control Tower's 7425348273 got two `success`,
+ * 69 seconds apart — and each report starts a run, so only the first of each
+ * state is news. A different state is: a held release published later.
+ */
+export function repeatsEarlierStatus(statuses: readonly { id: number; state: string }[], statusId: number): boolean {
+  const current = statuses.find((status) => status.id === statusId);
+  if (current === undefined || buildOutcome(current.state) === null) return false;
+  return statuses.some((status) => status.id < statusId && status.state === current.state);
 }
 
 /**
@@ -187,10 +200,21 @@ export interface Notice {
   project: string;
   kind: NoticeKind;
   environment: DeployEnvironment;
+  /** What messages call `test`: the branch it deploys from, such as `test` or `staging`. */
+  testName: string;
+  /** The repo on GitHub, `https://github.com/<owner>/<name>`, where pull request links start. */
+  repoUrl: string;
+  /** The commit, and its subject for when no pull request made it. */
   commit: { sha: string; subject: string; url: string };
-  /** What the pull requests since the previous deploy of the same environment were; only read for `live`. */
+  /** The pull request that made the commit: a task, an umbrella, a hotfix, or a release. */
+  change: PullRequest | null;
+  /** Whether `change` is a release, the gate → the release branch. */
+  release: boolean;
+  /** What the deploy brought: a release's pull requests, or the ones since the previous deploy. Read for `live`. */
   pullRequests: PullRequest[];
   links: {
+    /** The environment's domain. */
+    site: string;
     /** The deployment's own URL on Vercel. */
     deployment: string;
     /** Where Vercel's build logs are; only for `build-failed`. */
@@ -208,98 +232,152 @@ export interface Notice {
   vercelSays?: string;
 }
 
-const PLACE: Record<DeployEnvironment, string> = { production: 'production', test: '`test`' };
+const done = (label: string): Step => ({ state: 'done', label });
+const failed = (label: string): Step => ({ state: 'failed', label });
 
-function heading(notice: Notice, text: string): string {
-  const short = notice.commit.sha.slice(0, 7);
-  return headed(notice.project, `${text} — ${link(notice.commit.url, short)} ${escape(notice.commit.subject)}`);
+/** What happened and what to do about it, for a notice that is not good news. */
+interface Trouble {
+  title: string;
+  steps: Step[];
+  happened: string;
+  todo: string;
+  /** Where the failure shows. */
+  look: { url: string; label: string };
 }
 
-function pullRequestLines(pullRequests: PullRequest[]): string[] {
-  return pullRequests.map((pr) => `• #${pr.number} ${escape(pr.title)}`);
-}
-
-function brings(count: number): string {
-  return count === 1 ? 'Brings 1 PR:' : `Brings ${count} PRs:`;
-}
-
-/** The message, in Slack's mrkdwn. */
-export function renderNotice(notice: Notice): string {
-  const place = PLACE[notice.environment];
+function trouble(notice: Notice): Trouble {
   const production = notice.environment === 'production';
+  const place = production ? 'production' : notice.testName;
+  const named = production ? 'production' : `\`${notice.testName}\``;
   const waited = notice.waitedMinutes ?? '?';
-  const lines: string[] = [];
+  // Production waits for its migrations before it takes a version; `test` takes it at once.
+  const site: Step = production ? { state: 'held', label: 'Site held back' } : done('Site live');
+  const held = 'Production is still on the previous version.';
+  const check = { url: notice.links.migrations ?? notice.links.run, label: "Supabase's check" };
 
   switch (notice.kind) {
     case 'build-failed':
-      lines.push(heading(notice, `🚨 *Deploy failed in ${place}*`));
-      lines.push(`Vercel could not build this version; ${place} is still on the previous one.`);
-      if (notice.vercelSays) lines.push(`Vercel: ${escape(notice.vercelSays)}`);
-      lines.push(link(notice.links.logs ?? notice.links.deployment, 'The deployment on Vercel'));
-      break;
+      return {
+        title: `the ${place} build failed`,
+        steps: [failed('Code built'), { state: 'held', label: 'Site held back' }],
+        happened: `Vercel could not build this version, so ${named} is still on the previous one.${notice.vercelSays ? ` Vercel: ${escape(notice.vercelSays)}` : ''}`,
+        todo: 'Read the build log, fix the error in a new pull request, and merge it.',
+        look: { url: notice.links.logs ?? notice.links.deployment, label: 'Build log in Vercel' },
+      };
 
-    case 'supabase-failed': {
-      const held = 'Vercel did not publish the new version: production is still on the previous one.';
+    case 'supabase-failed':
       switch (notice.supabaseStep ?? 'unknown') {
         case 'migrations':
-          lines.push(heading(notice, `🚨 *Migrations failed in ${place}*`));
-          lines.push(
-            production
-              ? `Supabase could not apply this commit's migrations. ${held}`
-              : 'Supabase could not apply them to the `test` database, and the new code is already live there: it may fail wherever it uses the new schema.',
-          );
-          break;
+          return {
+            title: `the ${place} database update failed`,
+            steps: [done('Code built'), failed('Database updated'), site],
+            happened: production
+              ? `Supabase could not apply this commit's migrations, and Vercel did not publish. ${held}`
+              : `Supabase could not apply the migrations, and the new code is already live in ${named}: it may fail wherever it uses the new schema.`,
+            todo: "Open Supabase's check to see which migration failed, and fix it in a new pull request.",
+            look: check,
+          };
         case 'buckets':
-          lines.push(heading(notice, `🚨 *Buckets failed in ${place}*`));
-          lines.push(
-            production
-              ? `Supabase applied the migrations, but not the buckets in \`supabase/config.toml\`. ${held}`
-              : 'Supabase applied the migrations to `test`, but not the buckets in `supabase/config.toml`. The new code is already live there: it may fail wherever it uses them.',
-          );
-          break;
+          return {
+            title: `the ${place} storage buckets failed`,
+            steps: [done('Code built'), done('Database updated'), failed('Storage buckets'), site],
+            happened: production
+              ? `Supabase applied the migrations, but not the buckets in \`supabase/config.toml\`, and Vercel did not publish. ${held}`
+              : `Supabase applied the migrations, but not the buckets in \`supabase/config.toml\`. The new code is already live in ${named}: it may fail wherever it uses them.`,
+            todo: production
+              ? "Open Supabase's check. Once the buckets fit production's storage limit, publish the held deployment in Vercel."
+              : "Open Supabase's check, and fix the buckets in a new pull request.",
+            look: check,
+          };
         case 'unknown':
-          lines.push(heading(notice, `🚨 *Supabase's check failed in ${place}*`));
-          lines.push(
-            production
-              ? `The step that failed is not one this notice knows, so it cannot tell whether the migrations were applied. ${held}`
-              : 'The step that failed is not one this notice knows, so it cannot tell whether the migrations of `test` were applied. The new code is already live there.',
-          );
-          break;
+          return {
+            title: `Supabase's check failed for ${place}`,
+            steps: [done('Code built'), failed("Supabase's check"), site],
+            happened: production
+              ? `A step this notice does not know failed, so it cannot tell whether the migrations were applied. ${held}`
+              : `A step this notice does not know failed, so it cannot tell whether the migrations were applied. The new code is already live in ${named}.`,
+            todo: "Open Supabase's check to see which step failed.",
+            look: check,
+          };
       }
-      lines.push(link(notice.links.migrations ?? notice.links.run, "Supabase's check"));
       break;
-    }
 
     case 'migrations-stalled':
-      lines.push(heading(notice, production ? '🚨 *Production held back*' : '🚨 *`test` without its migrations*'));
-      lines.push(
-        production
-          ? `Supabase has not finished the migrations after ${waited} minutes, and Vercel does not publish until it does: production is still on the previous version. If it is urgent and the new code does not depend on those migrations, «Force Promote» the deployment in Vercel.`
-          : `Supabase has not finished the migrations of \`test\` after ${waited} minutes, and the new code is already live there.`,
-      );
-      lines.push(link(notice.links.migrations ?? notice.links.deployment, notice.links.migrations ? "Supabase's check" : 'The deployment'));
-      break;
+      return {
+        title: production ? 'production deploy is stuck' : `${place} is waiting for its database`,
+        steps: [done('Code built'), { state: 'waiting', label: 'Database updating' }, site],
+        happened: production
+          ? `Supabase has not finished the migrations after ${waited} minutes, and Vercel does not publish until it does. ${held}`
+          : `Supabase has not finished the migrations after ${waited} minutes, and the new code is already live in ${named}.`,
+        todo: production
+          ? "Open Supabase's check. If it is urgent and the new code does not need those migrations, «Force Promote» the deployment in Vercel."
+          : "Open Supabase's check to see where it stopped.",
+        look: notice.links.migrations ? check : { url: notice.links.deployment, label: 'The deployment in Vercel' },
+      };
 
     case 'not-served':
-      lines.push(heading(notice, `🚨 *${production ? 'Production' : '`test`'} was not published*`));
-      lines.push(`The migrations finished, but ${waited} minutes later the domain of ${place} still serves another version. Check the deployment in Vercel.`);
-      lines.push(link(notice.links.deployment, 'The deployment'));
-      break;
+      return {
+        title: `${place} did not go live`,
+        steps: [done('Code built'), done('Database updated'), failed('Site live')],
+        happened: `The migrations finished, but ${waited} minutes later the domain of ${named} still serves another version.`,
+        todo: 'Open the deployment in Vercel and check that it took the domain.',
+        look: { url: notice.links.deployment, label: 'The deployment in Vercel' },
+      };
 
-    case 'live': {
-      const count = notice.pullRequests.length;
-      if (production) {
-        lines.push(heading(notice, '✅ *Production published*'));
-        if (count === 0) lines.push('Nothing new since the previous release: it is a redeploy.');
-        else lines.push(brings(count), ...pullRequestLines(notice.pullRequests));
-      } else {
-        lines.push(heading(notice, '✅ *`test` ready*'));
-        lines.push('The code and the database are both there: ready to try.');
-        if (count > 1) lines.push(brings(count), ...pullRequestLines(notice.pullRequests));
-      }
+    case 'live':
       break;
-    }
+  }
+  throw new Error(`${notice.kind} is not trouble`);
+}
+
+function pullRequestUrl(notice: Notice, number: number): string {
+  return `${notice.repoUrl}/pull/${number}`;
+}
+
+/** The table's first row: the release or the change, and the commit. */
+function changeFields(notice: Notice): Field[] {
+  const change = notice.change;
+  return [
+    {
+      label: notice.release ? 'Release' : 'Change',
+      value: change === null ? escape(notice.commit.subject) : link(pullRequestUrl(notice, change.number), `#${change.number} ${summaryOf(change.title)}`),
+    },
+    { label: 'Commit', value: link(notice.commit.url, notice.commit.sha.slice(0, 7)) },
+  ];
+}
+
+function whatsNew(notice: Notice): Message['list'] {
+  return {
+    label: `What's new (${notice.pullRequests.length})`,
+    items: notice.pullRequests.map((pr) => `• ${link(pullRequestUrl(notice, pr.number), `#${pr.number}`)} ${escape(summaryOf(pr.title))}`),
+  };
+}
+
+/** The message: a title, the steps, a table, and where to look. */
+export function renderNotice(notice: Notice): Message {
+  const production = notice.environment === 'production';
+
+  if (notice.kind === 'live') {
+    const message: Message = {
+      title: titled(notice.project, production ? 'production updated' : `${notice.testName} is ready to try`),
+      tone: production ? 'good' : 'ready',
+      steps: [done('Code built'), done('Database updated'), done('Site live')],
+      fields: changeFields(notice),
+      footer: [link(notice.links.site, production ? 'Open production' : `Open ${notice.testName}`)],
+    };
+    // A release lists what it brought; anything else, only when it brought more than its own change.
+    const own = notice.change !== null && notice.pullRequests.length === 1 && notice.pullRequests[0]?.number === notice.change.number;
+    if (notice.release || (notice.pullRequests.length > 0 && !own)) message.list = whatsNew(notice);
+    if (production && notice.pullRequests.length === 0 && !notice.release) message.note = 'Nothing new since the previous release: it is a redeploy.';
+    return message;
   }
 
-  return lines.join('\n');
+  const what = trouble(notice);
+  return {
+    title: titled(notice.project, what.title),
+    tone: 'bad',
+    steps: what.steps,
+    fields: [{ label: 'What happened', value: what.happened }, { label: 'What to do', value: what.todo }, ...changeFields(notice)],
+    footer: [link(what.look.url, what.look.label)],
+  };
 }

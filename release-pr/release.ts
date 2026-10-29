@@ -15,6 +15,7 @@
  * `github.ts` reads GitHub, `draft.ts` writes the body and compares it with
  * Linear, and `pr-rules` checks a release against it.
  */
+import { summaryOf } from '../lib/conventional.ts';
 import { issueLinks } from '../lib/linear.ts';
 
 export const MAIN = 'main';
@@ -92,8 +93,7 @@ export function releaseOf(gate: string, previous: number | null, pullRequests: r
 
 /** A row's words, from its title: `feat(board): drag a card` → `Drag a card`. Edited by hand before it goes out. */
 export function whatProductionGets(title: string): string {
-  const summary = title.replace(/^[a-z]+(?:\([^)]*\))?!?:\s*/, '').trim();
-  return (summary.charAt(0).toUpperCase() + summary.slice(1)).replaceAll('|', '\\|');
+  return summaryOf(title).replaceAll('|', '\\|');
 }
 
 const numbers = (pullRequests: number[]) => pullRequests.map((n) => `#${n}`).join(', ');

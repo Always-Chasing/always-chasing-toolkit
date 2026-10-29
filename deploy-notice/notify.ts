@@ -30,6 +30,11 @@
  * deploy notice cannot: a Supabase check that failed or stalled, or a database
  * that is ready while Vercel does not publish.
  *
+ * The pull request behind the commit comes from GitHub, never from the
+ * commit's text: a release names its own and lists what it brought. Vercel may
+ * report one deployment twice (`DEPLOYMENT_STATUS_ID` says which report started
+ * the run), and only the first report of each state is told.
+ *
  * The answers become one notice (`notice.ts`), posted to the Slack webhook —
  * or printed, with `--dry-run`, which is how a notice is tried against a real
  * deploy without posting anything.
@@ -43,7 +48,8 @@ import { appendFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
 
-import { postToSlack } from '../lib/slack.ts';
+import { payload, plainText, postToSlack } from '../lib/slack.ts';
+import { pullRequestsOfRelease } from '../release-pr/github.ts';
 import {
   buildOutcome,
   builtByVercel,
@@ -56,6 +62,7 @@ import {
   pullRequestsIn,
   releaseNotice,
   renderNotice,
+  repeatsEarlierStatus,
   type DeployEnvironment,
   type EnvironmentNames,
   type Notice,
@@ -86,7 +93,11 @@ interface Config {
   probePath: string;
   supabaseCheck: string;
   releaseBranch: string;
+  /** The branch `test` deploys from, such as `test` or `staging`: what messages call it, and where releases start. */
+  testBranch: string;
   migrationsWaitMinutes: number;
+  /** The repo on GitHub, where commit and pull request links start. */
+  repoUrl: string;
 }
 
 interface Deployment {
@@ -96,6 +107,7 @@ interface Deployment {
 }
 
 interface DeploymentStatus {
+  id: number;
   state: string;
   description: string | null;
   environmentUrl: string | null;
@@ -165,7 +177,9 @@ function toDeployment(raw: unknown): Deployment {
 
 function toDeploymentStatus(raw: unknown): DeploymentStatus {
   const status = object(raw, 'a deployment status');
+  if (typeof status.id !== 'number') fail('GitHub sent a deployment status without its id');
   return {
+    id: status.id,
     state: text(status.state, 'a deployment status'),
     description: maybeText(status.description),
     environmentUrl: maybeText(status.environment_url),
@@ -223,7 +237,8 @@ function repository(given: string | undefined): string {
   return match[1];
 }
 
-function configure(repo: string | undefined): Config {
+function configure(given: string | undefined): Config {
+  const repo = repository(given);
   const project = setting('PROJECT') ?? fail('PROJECT is not set: every message starts with the project name');
   const production = setting('PRODUCTION_URL') ?? fail('PRODUCTION_URL is not set');
   const test = setting('TEST_URL');
@@ -231,7 +246,7 @@ function configure(repo: string | undefined): Config {
   if (!Number.isInteger(wait) || wait < 1 || wait > 40) fail('MIGRATIONS_WAIT_MINUTES must be a whole number of minutes, from 1 to 40');
   return {
     project,
-    repo: repository(repo),
+    repo,
     domains: { production: origin('PRODUCTION_URL', production), test: test === null ? null : origin('TEST_URL', test) },
     environments: {
       production: setting('PRODUCTION_ENVIRONMENT') ?? 'Production',
@@ -240,7 +255,9 @@ function configure(repo: string | undefined): Config {
     probePath: setting('PROBE_PATH') ?? '/',
     supabaseCheck: setting('SUPABASE_CHECK') ?? 'Supabase Preview',
     releaseBranch: setting('RELEASE_BRANCH') ?? 'main',
+    testBranch: setting('TEST_BRANCH') ?? 'test',
     migrationsWaitMinutes: wait,
+    repoUrl: `${setting('GITHUB_SERVER_URL') ?? 'https://github.com'}/${repo}`,
   };
 }
 
@@ -256,6 +273,18 @@ async function github(path: string): Promise<unknown> {
     if (response.status < 500 || attempt === 3) fail(`GitHub answered ${response.status} to GET ${path}`);
     await sleep(2_000 * attempt);
   }
+}
+
+/** A read that may be refused: the pull requests, when the job lacks `pull-requests: read`. The notice goes out without them. */
+async function githubIfAllowed(path: string): Promise<unknown> {
+  const token = setting('GITHUB_TOKEN') ?? fail('GITHUB_TOKEN is not set');
+  const api = setting('GITHUB_API_URL') ?? 'https://api.github.com';
+  const response = await fetch(`${api}${path}`, {
+    headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' },
+  });
+  if (response.ok) return (await response.json()) as unknown;
+  console.error(`deploy-notice  GitHub answered ${response.status} to GET ${path}: the notice goes without its pull requests. Give the job pull-requests: read.`);
+  return null;
 }
 
 async function statusesOf(config: Config, id: number): Promise<DeploymentStatus[]> {
@@ -415,7 +444,7 @@ async function wasBuilt(config: Config, id: number): Promise<boolean> {
  * if nobody published the held one, its pull requests reach the domain with
  * this one, unlisted.
  */
-async function pullRequestsSince(config: Config, deployment: DeploymentFacts, subject: string): Promise<PullRequest[]> {
+async function pullRequestsSince(config: Config, deployment: DeploymentFacts, change: PullRequest | null): Promise<PullRequest[]> {
   let previous: Deployment | undefined;
   for (const candidate of (await deploymentsOf(config, deployment.githubEnvironment)).filter((d) => d.id < deployment.id)) {
     if (await wasBuilt(config, candidate.id)) {
@@ -423,7 +452,7 @@ async function pullRequestsSince(config: Config, deployment: DeploymentFacts, su
       break;
     }
   }
-  if (!previous) return pullRequestsIn([subject]);
+  if (!previous) return change === null ? [] : [change];
   if (previous.sha === deployment.sha) return [];
   const comparison = object(await github(`/repos/${config.repo}/compare/${previous.sha}...${deployment.sha}`), 'a comparison');
   // Releases and syncs are merge commits; what they carry are the squashed commits inside.
@@ -433,6 +462,30 @@ async function pullRequestsSince(config: Config, deployment: DeploymentFacts, su
     return parents.length === 1 ? [subjectOf(text(object(commit.commit, 'a commit').message, 'a commit'))] : [];
   });
   return pullRequestsIn(subjects);
+}
+
+/**
+ * The pull request that made a commit, from GitHub rather than from the
+ * commit's text: a merge commit may carry the pull request's title instead of
+ * «Merge pull request #N from …», as ECO's release #12 did. `null` for a
+ * commit pushed without one.
+ */
+async function pullRequestOf(config: Config, sha: string): Promise<(PullRequest & { base: string; head: string }) | null> {
+  const answer = await githubIfAllowed(`/repos/${config.repo}/commits/${sha}/pulls`);
+  if (answer === null) return null;
+  const pulls = list(answer, 'the pull requests of a commit').map((raw) => object(raw, 'a pull request'));
+  const merged = pulls.filter((pr) => typeof pr.merged_at === 'string');
+  const pr = merged.find((candidate) => candidate.merge_commit_sha === sha) ?? merged[0];
+  if (pr === undefined || typeof pr.number !== 'number') return null;
+  const ref = (side: unknown) => (typeof side === 'object' && side !== null ? maybeText((side as Record<string, unknown>).ref) : null) ?? '';
+  return { number: pr.number, title: text(pr.title, 'a pull request'), base: ref(pr.base), head: ref(pr.head) };
+}
+
+/** The change behind a commit, and whether it is a release: the pull request from the test branch into the release branch. */
+async function changeOf(config: Config, sha: string): Promise<{ change: PullRequest | null; release: boolean }> {
+  const pr = await pullRequestOf(config, sha);
+  if (pr === null) return { change: null, release: false };
+  return { change: { number: pr.number, title: pr.title }, release: pr.base === config.releaseBranch && pr.head === config.testBranch };
 }
 
 function summarize(kind: NoticeKind, message: string): void {
@@ -454,8 +507,9 @@ async function commitFacts(config: Config, sha: string): Promise<{ subject: stri
 /** Prints the notice, adds it to the run's summary, and posts it — unless it is a dry run. */
 async function deliver(notice: Notice, dryRun: boolean): Promise<void> {
   const message = renderNotice(notice);
-  console.log(message);
-  summarize(notice.kind, message);
+  console.log(plainText(message));
+  summarize(notice.kind, plainText(message));
+  if (process.argv.includes('--payload')) console.log(`\n${JSON.stringify(payload(message), null, 2)}`);
   if (dryRun) {
     console.log('\ndeploy-notice  dry run: nothing was posted');
     return;
@@ -464,7 +518,11 @@ async function deliver(notice: Notice, dryRun: boolean): Promise<void> {
   console.log('\ndeploy-notice ✓  posted to Slack');
 }
 
-async function notifyDeployment(config: Config, id: number, dryRun: boolean): Promise<void> {
+async function notifyDeployment(config: Config, id: number, statusId: number | null, dryRun: boolean): Promise<void> {
+  if (statusId !== null && repeatsEarlierStatus(await statusesOf(config, id), statusId)) {
+    console.log(`deploy-notice  deployment ${id} already reported this state: it was told then`);
+    return;
+  }
   const deployment = await loadDeployment(config, id);
   const environment = environmentOf(deployment.githubEnvironment, config.environments);
   const domain = environment === null ? null : config.domains[environment];
@@ -473,6 +531,7 @@ async function notifyDeployment(config: Config, id: number, dryRun: boolean): Pr
     return;
   }
   const commit = await commitFacts(config, deployment.sha);
+  const { change, release } = await changeOf(config, deployment.sha);
 
   let kind: NoticeKind;
   let migrations: string | undefined;
@@ -498,7 +557,16 @@ async function notifyDeployment(config: Config, id: number, dryRun: boolean): Pr
       waitedMinutes = config.migrationsWaitMinutes;
     } else if (await waitUntilServed(config, deployment, domain)) {
       kind = 'live';
-      pullRequests = await pullRequestsSince(config, deployment, commit.subject);
+      const gate = config.testBranch;
+      const token = setting('GITHUB_TOKEN') ?? '';
+      const brought =
+        release && change !== null
+          ? await pullRequestsOfRelease(config.repo, change.number, gate, token).catch((error: unknown) => {
+              console.error(`deploy-notice  ${error instanceof Error ? error.message : String(error)}: the release lists the commits since the previous one instead`);
+              return null;
+            })
+          : null;
+      pullRequests = brought?.map((pr) => ({ number: pr.number, title: pr.title })) ?? (await pullRequestsSince(config, deployment, change));
     } else {
       kind = 'not-served';
       waitedMinutes = SERVED_WAIT_MINUTES;
@@ -510,9 +578,13 @@ async function notifyDeployment(config: Config, id: number, dryRun: boolean): Pr
       project: config.project,
       kind,
       environment,
+      testName: config.testBranch,
+      repoUrl: config.repoUrl,
       commit: { sha: deployment.sha, subject: commit.subject, url: commit.url },
+      change,
+      release,
       pullRequests,
-      links: { deployment: deployment.url, logs: deployment.logs ?? undefined, migrations, run: commit.run },
+      links: { site: domain, deployment: deployment.url, logs: deployment.logs ?? undefined, migrations, run: commit.run },
       supabaseStep,
       waitedMinutes,
       vercelSays: kind === 'build-failed' ? (deployment.description ?? undefined) : undefined,
@@ -529,6 +601,7 @@ async function notifyDeployment(config: Config, id: number, dryRun: boolean): Pr
 async function watchRelease(config: Config, sha: string, dryRun: boolean): Promise<void> {
   if (!/^[0-9a-f]{40}$/.test(sha)) fail(`${sha} is not a full commit SHA`);
   const commit = await commitFacts(config, sha);
+  const { change, release } = await changeOf(config, sha);
   const migrations = await waitForMigrations(config, sha);
 
   let publication: 'published' | 'failed' | 'pending' = 'pending';
@@ -555,9 +628,13 @@ async function watchRelease(config: Config, sha: string, dryRun: boolean): Promi
       project: config.project,
       kind,
       environment: 'production',
+      testName: config.testBranch,
+      repoUrl: config.repoUrl,
       commit: { sha, subject: commit.subject, url: commit.url },
+      change,
+      release,
       pullRequests: [],
-      links: { deployment: deployment ?? commit.url, migrations: migrations.url, run: commit.run },
+      links: { site: config.domains.production ?? commit.url, deployment: deployment ?? commit.url, migrations: migrations.url, run: commit.run },
       supabaseStep: migrations.step,
       waitedMinutes: kind === 'migrations-stalled' ? config.migrationsWaitMinutes : kind === 'not-served' ? PUBLISH_WAIT_MINUTES : undefined,
     },
@@ -572,6 +649,7 @@ async function main(): Promise<void> {
       deployment: { type: 'string' },
       release: { type: 'string' },
       'dry-run': { type: 'boolean', default: false },
+      payload: { type: 'boolean', default: false },
     },
   });
   const config = configure(values.repo);
@@ -582,7 +660,9 @@ async function main(): Promise<void> {
 
   const id = Number(values.deployment ?? setting('DEPLOYMENT_ID'));
   if (!Number.isInteger(id) || id <= 0) fail('which deploy? Pass --deployment <id> or --release <sha>, or set DEPLOYMENT_ID or RELEASE_SHA.');
-  return notifyDeployment(config, id, dryRun);
+  // The status that started the run; none when a person asked for the notice again.
+  const statusId = Number(setting('DEPLOYMENT_STATUS_ID') ?? NaN);
+  return notifyDeployment(config, id, Number.isInteger(statusId) ? statusId : null, dryRun);
 }
 
 main().catch((error: unknown) => {

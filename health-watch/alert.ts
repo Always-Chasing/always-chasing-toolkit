@@ -1,8 +1,8 @@
 /**
  * What the health watch tells Slack: a project's `/api/health` read every
- * half hour, a message when a check starts failing, and a reminder every 6
- * hours while it keeps failing. Pure: `watch.ts` fetches, posts and keeps the
- * state.
+ * half hour, a message when a check starts failing, a reminder every 6 hours
+ * while it keeps failing, and one more when it works again. Pure: `watch.ts`
+ * fetches, posts and keeps the state.
  *
  * The route is the project's, and it answers one of two ways:
  *
@@ -16,7 +16,7 @@
  * since when, and where the detail is, never data.
  */
 
-import { escape, headed } from '../lib/slack.ts';
+import { escape, link, titled, type Field, type Message } from '../lib/slack.ts';
 
 /** The watch's own code: the route did not answer, or not with its report. */
 export const UNREACHABLE = 'unreachable';
@@ -88,6 +88,8 @@ export interface Decision {
   started: FailingCheck[];
   /** Still failing, told 6 hours ago or more. */
   reminded: FailingCheck[];
+  /** Told as failing before, and not failing now. */
+  recovered: string[];
   /** What to remember for the next run: a code that stopped failing is forgotten, so failing again is news. */
   next: WatchState;
 }
@@ -109,7 +111,8 @@ export function decide(read: HealthRead, state: WatchState, now: Date): Decision
       told[check.code] = last;
     }
   }
-  return { started, reminded, next: { told } };
+  const recovered = Object.keys(state.told).filter((code) => !(code in told));
+  return { started, reminded, recovered, next: { told } };
 }
 
 /** Everything a message needs besides what failed. */
@@ -126,46 +129,72 @@ export interface Context {
   timeZone: string;
 }
 
-/** One check: its code, since when in parentheses, and what it means. */
-function line(check: FailingCheck, context: Context): string {
-  const words =
-    context.words[check.code] ??
-    (check.code === UNREACHABLE ? `Production does not answer: ${context.healthPath} did not respond as it should.` : 'A check this watch does not know.');
-  const when = new Intl.DateTimeFormat('en-US', {
-    timeZone: context.timeZone,
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    timeZoneName: 'short',
-  });
-  const since = check.since === null || Number.isNaN(Date.parse(check.since)) ? '' : ` (since ${when.format(new Date(check.since))})`;
-  return `• \`${check.code}\`${since}: ${escape(words)}`;
+/** A check in words, for a row's label: `queue_stuck` → «Queue stuck». */
+export function checkName(code: string): string {
+  if (code === UNREACHABLE) return 'Production does not answer';
+  const words = code.replaceAll('_', ' ');
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
-const count = (checks: readonly FailingCheck[], one: string, many: string) => (checks.length === 1 ? one : many.replace('#', String(checks.length)));
+/** When a check started failing, in the project's time zone: the time alone today, the day too before. */
+function sinceText(since: string | null, context: Context, now: Date): string | null {
+  if (since === null || Number.isNaN(Date.parse(since))) return null;
+  const date = new Date(since);
+  const day = (moment: Date) => new Intl.DateTimeFormat('en-CA', { timeZone: context.timeZone }).format(moment);
+  const time = new Intl.DateTimeFormat('en-US', { timeZone: context.timeZone, hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }).format(date);
+  if (day(date) === day(now)) return time;
+  return `${new Intl.DateTimeFormat('en-US', { timeZone: context.timeZone, month: 'short', day: 'numeric' }).format(date)}, ${time}`;
+}
+
+/** One check, one row: its name, and since when and what it means. */
+function row(check: FailingCheck, context: Context, now: Date): Field {
+  const words =
+    context.words[check.code] ??
+    (check.code === UNREACHABLE ? `${context.healthPath} did not respond as it should.` : 'A check this watch does not know.');
+  const since = sinceText(check.since, context, now);
+  return { label: checkName(check.code), value: since === null ? escape(words) : `Since ${escape(since)} · ${escape(words)}` };
+}
+
+const problems = (count: number) => (count === 1 ? 'a problem' : `${count} problems`);
+
+function detailsLink(context: Context): string[] {
+  return context.detailsPath === null ? [] : [link(`${context.origin}${context.detailsPath}`, 'Open diagnostics')];
+}
 
 /** What a test posts: proof that a message reaches the channel, saying it is one. */
-export function testText(project: string): string {
-  return headed(project, '🧪 *Health watch test*: this is how an alert reaches this channel. Nothing is failing.');
+export function testMessage(project: string): Message {
+  return {
+    title: titled(project, 'health watch test'),
+    tone: 'ready',
+    note: 'This is how an alert reaches this channel. Nothing is failing.',
+  };
 }
 
 /**
- * The message, in Slack's own markup, or null when there is nothing to tell.
- * What started failing goes first, then what keeps failing, then where the
- * detail is.
+ * The message, or null when there is nothing to tell: what fails, new first,
+ * a row each; or, when nothing new fails or is due a reminder, what works
+ * again.
  */
-export function alertText(decision: Pick<Decision, 'started' | 'reminded'>, context: Context): string | null {
-  if (decision.started.length === 0 && decision.reminded.length === 0) return null;
-  const parts: string[] = [];
-  if (decision.started.length > 0) {
-    parts.push(`🚨 *Production: ${count(decision.started, 'a check started failing', '# checks started failing')}*`, ...decision.started.map((check) => line(check, context)));
+export function alertMessage(decision: Decision, context: Context, now: Date): Message | null {
+  const failing = [...decision.started, ...decision.reminded];
+  const workingAgain = decision.recovered.map((code): Field => ({ label: checkName(code), value: '✅ Fixed' }));
+  if (failing.length > 0) {
+    return {
+      title: titled(context.project, decision.started.length > 0 ? `production has ${problems(failing.length)}` : `production still has ${problems(failing.length)}`),
+      tone: 'warning',
+      fields: [...failing.map((check) => row(check, context, now)), ...workingAgain],
+      footer: ['Reminder every 6 h while it fails', ...detailsLink(context)],
+    };
   }
-  if (decision.reminded.length > 0) {
-    if (parts.length > 0) parts.push('');
-    parts.push(`⏰ *Production: ${count(decision.reminded, 'a check is still failing', '# checks are still failing')}*`, ...decision.reminded.map((check) => line(check, context)));
+  if (workingAgain.length > 0) {
+    // What still fails was told already, and is due no reminder yet; it is named, not told again.
+    const still = Object.keys(decision.next.told).map(checkName);
+    return {
+      title: titled(context.project, still.length === 0 ? 'production is back to normal' : `${workingAgain.length === 1 ? 'a problem is' : `${workingAgain.length} problems are`} fixed in production`),
+      tone: 'good',
+      fields: still.length === 0 ? workingAgain : [...workingAgain, { label: 'Still failing', value: escape(still.join(', ')) }],
+      footer: [link(context.origin, 'Open production'), ...detailsLink(context)],
+    };
   }
-  if (context.detailsPath !== null) parts.push('', `The detail, with its ids, is at <${context.origin}${context.detailsPath}|${escape(context.detailsPath)}>.`);
-  parts[0] = headed(context.project, parts[0] ?? '');
-  return parts.join('\n');
+  return null;
 }

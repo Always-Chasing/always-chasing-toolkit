@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { alertText, decide, EMPTY_STATE, readChecks, readHealth, readState, REMIND_AFTER_MS, testText, UNREACHABLE, type Context, type HealthRead } from './alert.ts';
+import { payload } from '../lib/slack.ts';
+import { alertMessage, checkName, decide, EMPTY_STATE, readChecks, readHealth, readState, REMIND_AFTER_MS, testMessage, UNREACHABLE, type Context, type Decision, type HealthRead } from './alert.ts';
 
 const NOW = new Date('2026-10-09T18:00:00Z');
 const hoursAgo = (hours: number) => new Date(NOW.getTime() - hours * 60 * 60_000).toISOString();
@@ -87,62 +88,92 @@ describe('when it tells Slack', () => {
     assert.deepEqual(reminder.next, { told: { connection_down: NOW.toISOString() } });
   });
 
-  it('forgets what stopped failing, so failing again is news', () => {
+  it('tells what stopped failing, and forgets it, so failing again is news', () => {
     const recovered = decide({ kind: 'ok' }, { told: { connection_down: hoursAgo(1) } }, NOW);
-    assert.deepEqual(recovered, { started: [], reminded: [], next: { told: {} } });
+    assert.deepEqual(recovered, { started: [], reminded: [], recovered: ['connection_down'], next: { told: {} } });
     assert.equal(decide(failing('connection_down'), recovered.next, NOW).started.length, 1);
   });
 });
 
+const told = (codes: Record<string, string>): Decision['next'] => ({ told: codes });
+const decision = (part: Partial<Decision>): Decision => ({ started: [], reminded: [], recovered: [], next: told({}), ...part });
+
 describe('what it says', () => {
-  it('names the project, what started failing and what keeps failing, with since when, and where the detail is', () => {
-    const text = alertText(
-      {
-        started: [{ code: 'connection_down', since: '2026-10-09T15:05:00.000Z' }],
-        reminded: [
-          { code: 'webhook_silent', since: null },
-          { code: 'limit_near', since: null },
-        ],
-      },
+  it('titles what fails with the project, in amber, one row per check with since when and what it means', () => {
+    const message = alertMessage(
+      decision({
+        started: [{ code: 'connection_down', since: '2026-10-09T17:37:00.000Z' }],
+        reminded: [{ code: 'webhook_silent', since: '2026-10-08T15:05:00.000Z' }],
+      }),
       CONTEXT,
+      NOW,
     );
-    assert.equal(
-      text,
-      [
-        '*Control Tower* · 🚨 *Production: a check started failing*',
-        '• `connection_down` (since Oct 9, 9:05 AM CST): The WhatsApp number is disconnected from the panel.',
-        '',
-        '⏰ *Production: 2 checks are still failing*',
-        '• `webhook_silent`: Meta took messages and its webhook has said nothing for 2 hours.',
-        '• `limit_near`: The number nears its daily limit of new contacts.',
-        '',
-        'The detail, with its ids, is at <https://control-tower.example.com/diagnostics|/diagnostics>.',
-      ].join('\n'),
-    );
+    assert.deepEqual(message, {
+      title: 'Control Tower · production has 2 problems',
+      tone: 'warning',
+      fields: [
+        { label: 'Connection down', value: 'Since 11:37 AM CST · The WhatsApp number is disconnected from the panel.' },
+        { label: 'Webhook silent', value: 'Since Oct 8, 9:05 AM CST · Meta took messages and its webhook has said nothing for 2 hours.' },
+      ],
+      footer: ['Reminder every 6 h while it fails', '<https://control-tower.example.com/diagnostics|Open diagnostics>'],
+    });
   });
 
-  it('starts with the project when only reminders are news, and leaves out a detail page the project has not', () => {
-    const text = alertText({ started: [], reminded: [{ code: 'limit_near', since: null }] }, { ...CONTEXT, detailsPath: null });
-    assert.equal(text, ['*Control Tower* · ⏰ *Production: a check is still failing*', '• `limit_near`: The number nears its daily limit of new contacts.'].join('\n'));
+  it('says production still has them when only reminders are news, and leaves out a detail page the project has not', () => {
+    const message = alertMessage(decision({ reminded: [{ code: 'limit_near', since: null }] }), { ...CONTEXT, detailsPath: null }, NOW);
+    assert.equal(message?.title, 'Control Tower · production still has a problem');
+    assert.deepEqual(message?.fields, [{ label: 'Limit near', value: 'The number nears its daily limit of new contacts.' }]);
+    assert.deepEqual(message?.footer, ['Reminder every 6 h while it fails']);
+  });
+
+  it('tells in green when production is back to normal', () => {
+    const message = alertMessage(decision({ recovered: ['connection_down', UNREACHABLE] }), CONTEXT, NOW);
+    assert.equal(message?.title, 'Control Tower · production is back to normal');
+    assert.equal(message?.tone, 'good');
+    assert.deepEqual(message?.fields, [
+      { label: 'Connection down', value: '✅ Fixed' },
+      { label: 'Production does not answer', value: '✅ Fixed' },
+    ]);
+  });
+
+  it('names what still fails when only part of it got fixed', () => {
+    const message = alertMessage(decision({ recovered: ['connection_down'], next: told({ limit_near: hoursAgo(1) }) }), CONTEXT, NOW);
+    assert.equal(message?.title, 'Control Tower · a problem is fixed in production');
+    assert.deepEqual(message?.fields?.at(-1), { label: 'Still failing', value: 'Limit near' });
+  });
+
+  it('lists what got fixed beside what fails, when both happen at once', () => {
+    const message = alertMessage(decision({ started: [{ code: 'limit_near', since: null }], recovered: ['connection_down'] }), CONTEXT, NOW);
+    assert.equal(message?.tone, 'warning');
+    assert.deepEqual(message?.fields?.map((field) => field.value), ['The number nears its daily limit of new contacts.', '✅ Fixed']);
   });
 
   it('says nothing when nothing is news, and names a code it does not know as itself', () => {
-    assert.equal(alertText({ started: [], reminded: [] }, CONTEXT), null);
-    assert.match(alertText({ started: [{ code: 'something_new', since: null }], reminded: [] }, CONTEXT) ?? '', /• `something_new`: A check this watch does not know\./);
+    assert.equal(alertMessage(decision({}), CONTEXT, NOW), null);
+    assert.deepEqual(alertMessage(decision({ started: [{ code: 'something_new', since: null }] }), CONTEXT, NOW)?.fields, [
+      { label: 'Something new', value: 'A check this watch does not know.' },
+    ]);
   });
 
   it('has its own words for production not answering, which the project may replace', () => {
-    const decision = { started: [{ code: UNREACHABLE, since: null }], reminded: [] };
-    assert.match(alertText(decision, CONTEXT) ?? '', /• `unreachable`: Production does not answer: \/api\/health did not respond as it should\./);
-    assert.match(alertText(decision, { ...CONTEXT, words: { unreachable: 'Nobody home.' } }) ?? '', /• `unreachable`: Nobody home\./);
+    const down = decision({ started: [{ code: UNREACHABLE, since: null }] });
+    assert.deepEqual(alertMessage(down, CONTEXT, NOW)?.fields, [{ label: 'Production does not answer', value: '/api/health did not respond as it should.' }]);
+    assert.equal(alertMessage(down, { ...CONTEXT, words: { unreachable: 'Nobody home.' } }, NOW)?.fields?.[0]?.value, 'Nobody home.');
   });
 
   it('escapes the words, so a sentence cannot become a link or a mention', () => {
-    const text = alertText({ started: [{ code: 'queue_stuck', since: null }], reminded: [] }, { ...CONTEXT, words: { queue_stuck: 'Stuck <!channel> & co.' } });
-    assert.match(text ?? '', /Stuck &lt;!channel&gt; &amp; co\./);
+    const message = alertMessage(decision({ started: [{ code: 'queue_stuck', since: null }] }), { ...CONTEXT, words: { queue_stuck: 'Stuck <!channel> & co.' } }, NOW);
+    assert.equal(message?.fields?.[0]?.value, 'Stuck &lt;!channel&gt; &amp; co.');
+  });
+
+  it('names checks in words', () => {
+    assert.equal(checkName('queue_stuck'), 'Queue stuck');
+    assert.equal(checkName(UNREACHABLE), 'Production does not answer');
   });
 
   it('says a test is a test, naming the project', () => {
-    assert.equal(testText('Control Tower'), '*Control Tower* · 🧪 *Health watch test*: this is how an alert reaches this channel. Nothing is failing.');
+    const message = testMessage('Control Tower');
+    assert.equal(message.title, 'Control Tower · health watch test');
+    assert.match(JSON.stringify(payload(message)), /Nothing is failing\./);
   });
 });

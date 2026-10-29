@@ -72,3 +72,22 @@ export async function releaseFromGitHub(repo: string, gate: string, teamKeys: re
   const pullRequests = await Promise.all(pullRequestNumbers(messages).map((number) => mergedPullRequest(repo, number, token)));
   return releaseOf(gate, previous, pullRequests.filter((pr) => pr !== null), teamKeys);
 }
+
+/**
+ * What a merged release brought, from the release pull request itself: the
+ * pull requests that entered the gate, one each, as its table lists them.
+ * GitHub gives up to 250 commits of a pull request, plenty for a release.
+ */
+export async function pullRequestsOfRelease(repo: string, number: number, gate: string, token: string): Promise<MergedPullRequest[]> {
+  const messages: string[] = [];
+  for (let page = 1; page <= 3; page += 1) {
+    const commits = asList(await github(`/repos/${repo}/pulls/${number}/commits?per_page=100&page=${page}`, token), 'the commits of a pull request') as {
+      commit?: { message?: string };
+    }[];
+    messages.push(...commits.map((commit) => commit.commit?.message ?? ''));
+    if (commits.length < 100) break;
+  }
+  const numbers = pullRequestNumbers(messages).filter((found) => found !== number);
+  const pullRequests = await Promise.all(numbers.map((found) => mergedPullRequest(repo, found, token)));
+  return releaseOf(gate, null, pullRequests.filter((pr) => pr !== null), []).rows;
+}

@@ -45,6 +45,10 @@ inputs:
     description: The branch whose merges reach production.
     required: false
     default: main
+  test-branch:
+    description: The branch test deploys from, such as test or staging. Messages call test by this name, and a release is a pull request from it.
+    required: false
+    default: test
   migrations-wait-minutes:
     description: How long to wait for Supabase before calling the migrations stalled. Match the Vercel Deployment Check, if production has one.
     required: false
@@ -62,7 +66,7 @@ inputs:
     required: false
     default: 'false'
   github-token:
-    description: Reads the repo's deployments, check runs and commit statuses.
+    description: Reads the repo's deployments, check runs, commit statuses and pull requests.
     required: false
     default: ${{ github.token }}
 
@@ -85,8 +89,11 @@ runs:
         PROBE_PATH: ${{ inputs.probe-path }}
         SUPABASE_CHECK: ${{ inputs.supabase-check }}
         RELEASE_BRANCH: ${{ inputs.release-branch }}
+        TEST_BRANCH: ${{ inputs.test-branch }}
         MIGRATIONS_WAIT_MINUTES: ${{ inputs.migrations-wait-minutes }}
         DEPLOYMENT_ID: ${{ inputs.deployment-id || github.event.deployment.id }}
+        # The report that started the run: Vercel may send the same one twice, and only the first is told.
+        DEPLOYMENT_STATUS_ID: ${{ !inputs.deployment-id && github.event.deployment_status.id || '' }}
         RELEASE_SHA: ${{ inputs.release-sha || (github.event_name == 'push' && github.sha) || '' }}
         DRY_RUN: ${{ inputs.dry-run }}
         GITHUB_TOKEN: ${{ inputs.github-token }}

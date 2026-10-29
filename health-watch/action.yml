@@ -13,7 +13,7 @@
 # and every input reaches the script as environment, never as part of a
 # command.
 name: Health watch
-description: Reads a project's /api/health and tells Slack when a check starts failing, and every 6 hours while it keeps failing.
+description: Reads a project's /api/health and tells Slack when a check starts failing, every 6 hours while it keeps failing, and when it works again.
 author: Always Chasing
 
 inputs:
