@@ -1,0 +1,26 @@
+# The toolkit's own pull requests, checked with its own pr-rules: a task goes
+# to main and closes its INT issue. Apart from CI because it also has to run
+# when someone edits the title, the body or the base.
+#
+# To edit it: actions pinned to a full commit SHA with the version beside it,
+# no secrets, and no permission beyond reading the repo.
+name: Pull request
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  rules:
+    name: Rules
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      # The action as this pull request leaves it, read by GitHub: no checkout.
+      - uses: $/pr-rules
+        with:
+          team-keys: INT
