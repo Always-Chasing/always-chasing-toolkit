@@ -395,7 +395,10 @@ it takes the magic words:
 
 Then it compares that list with the issues of the team in In Test that a pull request of the repo
 links, and says which differ: one the release completes that is not in In Test, or one in In Test
-that no pull request completes. It exits with 1 when they differ, after writing the body.
+that no pull request completes. **It also names an issue of the release that an open pull request
+still links**, by a magic word —`Part of` too— or by its ID in the title or the branch: Linear moves
+no issue while a pull request linked to it is open, so the release would leave it where it is. It
+exits with 1 when anything is off, after writing the body.
 
 From the project's checkout, with a clone of this repo beside it:
 
@@ -425,7 +428,7 @@ Linear's with read access is enough.
 
 **The «Rules» check holds the release to it.** `pr-rules` fails a release that does not complete
 an issue some pull request in it finishes, reading GitHub with the job's token, and warns of one it
-completes that no pull request finishes. It does not read Linear. An issue that should not reach
+completes that no pull request finishes, and of one an open pull request still links. It does not read Linear. An issue that should not reach
 Done with this release is fixed where it was promised: edit the body of the pull request that
 finished it to say `Part of`, and the check runs again on the next edit of the release.
 

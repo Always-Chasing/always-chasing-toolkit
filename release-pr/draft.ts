@@ -8,9 +8,11 @@
  *
  * The body goes to stdout: the pull requests that entered the gate since the
  * previous release, one row each, and a `Completes` line for each issue they
- * finish (`release.ts`). The rest goes to stderr: what was found, and how it
+ * finish (`release.ts`). The rest goes to stderr: what was found, how it
  * compares with the issues of one Linear team in In Test that a pull request
- * of this repo links. It exits 1 when they differ, after writing the body.
+ * of this repo links, and which of those issues an open pull request still
+ * links, which keeps Linear from moving them. It exits 1 when anything is off,
+ * after writing the body.
  *
  * The Linear key is read from the environment and goes nowhere but Linear's
  * API; without it, the comparison is left out. Plain Node, no dependencies.
@@ -18,8 +20,8 @@
 import { execFileSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 
-import { releaseFromGitHub } from './github.ts';
-import { compareWithInTest, releaseBody, type LinearIssue, type Release } from './release.ts';
+import { openPullRequests, releaseFromGitHub } from './github.ts';
+import { compareWithInTest, linkedToOpenPullRequests, releaseBody, type LinearIssue, type Release } from './release.ts';
 
 const LINEAR_API = 'https://api.linear.app/graphql';
 const IN_TEST = 'In Test';
@@ -168,7 +170,15 @@ async function main(): Promise<void> {
   const release = await releaseFromGitHub(repo, values.gate, teamKeys, token).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   process.stdout.write(releaseBody(release));
   describe(release);
-  const same = await compare(release, repo, team);
+  let same = await compare(release, repo, team);
+  const open = await openPullRequests(repo, token).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
+  for (const issue of linkedToOpenPullRequests(release, open, teamKeys)) {
+    same = false;
+    console.error(
+      `✗ ${issue.id} is also linked to ${numbers(issue.pullRequests)}, still open, and Linear moves no issue while a pull request linked to it is open. ` +
+        `Merge or close ${numbers(issue.pullRequests)} before the release, or take ${issue.id} out of it.`,
+    );
+  }
   if (release.rows.length > 0) {
     console.error(
       `Next: describe each row in your own words, add what is worth knowing before production, and open it:\n` +

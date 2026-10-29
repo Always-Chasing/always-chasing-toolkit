@@ -5,6 +5,7 @@ import {
   byIssue,
   checkBody,
   compareWithInTest,
+  linkedToOpenPullRequests,
   pullRequestNumbers,
   releaseBody,
   releaseOf,
@@ -180,6 +181,25 @@ describe('a release against Linear', () => {
   it('compares only the team it is given', () => {
     const other = releaseOf('test', null, [pr(1, 'test', 'feature/x', 'feat: x', 'Completes OPS-4')], keys);
     assert.deepEqual(compareWithInTest(other, 'DEV', 'In Test', [], new Map()).notInTest, []);
+  });
+});
+
+describe('an issue an open pull request still links', () => {
+  const release = releaseOf('test', 329, [pr(333, 'test', 'chore/shared-pr-rules', 'ci: check every pull request', 'Completes DEV-401')], keys);
+  const open = (number: number, body: string, title = 'docs: a note', head = 'docs/a-note', base = 'test') => ({ number, title, body, base, head });
+
+  it('is named with the pull requests that link it — DEV-401 and #337 after release #334', () => {
+    assert.deepEqual(linkedToOpenPullRequests(release, [open(337, 'Part of DEV-401'), open(340, 'Completes DEV-9')], keys), [{ id: 'DEV-401', pullRequests: [337] }]);
+  });
+
+  it('counts a closing word, an ID in the title or in the branch, as Linear does', () => {
+    for (const linking of [open(1, 'Fixes DEV-401'), open(2, '', 'docs: follow up DEV-401'), open(3, '', 'docs: a note', 'docs/dev-401-follow-up')]) {
+      assert.equal(linkedToOpenPullRequests(release, [linking], keys).length, 1, JSON.stringify(linking));
+    }
+  });
+
+  it('leaves out the release itself, and an issue whose number only starts the same', () => {
+    assert.deepEqual(linkedToOpenPullRequests(release, [open(334, 'Completes DEV-401', 'chore: release', 'test', 'main'), open(5, 'Part of DEV-4010'), open(6, '', 'XDEV-401')], keys), []);
   });
 });
 
