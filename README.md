@@ -97,7 +97,7 @@ jobs:
       checks: read
       deployments: read
     steps:
-      - uses: Always-Chasing/always-chasing-toolkit/deploy-notice@<full SHA of v1> # v1
+      - uses: Always-Chasing/always-chasing-toolkit/deploy-notice@<full SHA of the version> # v1.2.0
         with:
           project: Example
           webhook-url: ${{ secrets.SLACK_ALERTS_WEBHOOK_URL }}
@@ -117,7 +117,7 @@ jobs:
       checks: read
       statuses: read
     steps:
-      - uses: Always-Chasing/always-chasing-toolkit/deploy-notice@<full SHA of v1> # v1
+      - uses: Always-Chasing/always-chasing-toolkit/deploy-notice@<full SHA of the version> # v1.2.0
         with:
           project: Example
           webhook-url: ${{ secrets.SLACK_ALERTS_WEBHOOK_URL }}
@@ -211,7 +211,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: health-checks.json
           sparse-checkout-cone-mode: false
-      - uses: Always-Chasing/always-chasing-toolkit/health-watch@<full SHA of v1> # v1
+      - uses: Always-Chasing/always-chasing-toolkit/health-watch@<full SHA of the version> # v1.2.0
         with:
           project: Example
           webhook-url: ${{ secrets.SLACK_ALERTS_WEBHOOK_URL }}
@@ -309,7 +309,7 @@ jobs:
       # Only a release reads anything: what it releases.
       pull-requests: read
     steps:
-      - uses: Always-Chasing/always-chasing-toolkit/pr-rules@<full SHA of v1> # v1
+      - uses: Always-Chasing/always-chasing-toolkit/pr-rules@<full SHA of the version> # v1.2.0
         with:
           gate: test
 ```
@@ -432,9 +432,19 @@ project that uses it, from the table above.
 
 ## Versions
 
-`v1` moves with every change that keeps the inputs and the behavior a project relies on. A change
-that breaks them is `v2`. Projects pin the full SHA of the version, with the version beside it,
-like any other action: a tag can move, a SHA cannot.
+Each release gets its exact version, such as `v1.2.0`, which never moves. `v1` moves with every
+change that keeps the inputs and the behavior a project relies on; a change that breaks them is
+`v2`.
+
+Projects pin the full SHA of an exact version, with that version beside it, like any other action:
+a tag can move, a SHA cannot. **Beside the SHA goes the exact version, never `v1`**: when `v1`
+moves, a pin that says `v1` beside an older SHA stops being true, and zizmor's
+`ref-version-mismatch` fails the project's CI. With the exact version, Dependabot proposes the next
+one as a pull request.
+
+```bash
+git ls-remote https://github.com/Always-Chasing/always-chasing-toolkit 'refs/tags/v1.2.0^{}'
+```
 
 ## Develop
 
