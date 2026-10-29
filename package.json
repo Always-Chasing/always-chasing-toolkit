@@ -7,7 +7,7 @@
   },
   "scripts": {
     "typecheck": "tsc",
-    "test": "node --disable-warning=ExperimentalWarning --test lib/*.test.ts deploy-notice/*.test.ts health-watch/*.test.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test lib/*.test.ts deploy-notice/*.test.ts health-watch/*.test.ts pr-rules/*.test.ts",
     "check": "npm run typecheck && npm test"
   },
   "devDependencies": {

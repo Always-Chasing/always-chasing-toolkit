@@ -1,16 +1,17 @@
 # Always Chasing Toolkit
 
-GitHub actions that every Always Chasing project reuses. Today it holds two Slack alerts for
-projects on Vercel and Supabase. Both post to `#alerts`, the private channel of the «Always
-Chasing» Slack, through one app, Mr.Chase:
+GitHub actions that every Always Chasing project reuses: two Slack alerts for projects on Vercel
+and Supabase, and the check that keeps every pull request within the Git conventions.
 
-| Action | What it tells |
+| Action | What it does |
 |---|---|
-| [`deploy-notice`](deploy-notice/action.yml) | Whether a deploy of `test` or production went live: Vercel's build, Supabase's migrations, and whether the domain already serves the new version. When it did not go live, it says why |
-| [`health-watch`](health-watch/action.yml) | What started failing in production, read from the project's `/api/health` every half hour, and a reminder every 6 hours while it keeps failing. It also speaks when production does not answer at all |
+| [`deploy-notice`](deploy-notice/action.yml) | Tells whether a deploy of `test` or production went live: Vercel's build, Supabase's migrations, and whether the domain already serves the new version. When it did not go live, it says why |
+| [`health-watch`](health-watch/action.yml) | Tells what started failing in production, read from the project's `/api/health` every half hour, and reminds every 6 hours while it keeps failing. It also speaks when production does not answer at all |
+| [`pr-rules`](pr-rules/action.yml) | Fails a pull request whose title, branch, base or link to Linear breaks the conventions, and says how to fix it |
 
-All the projects post through the same app, so **every message starts with the project's name**.
-The messages are in English.
+Both alerts post to `#alerts`, the private channel of the «Always Chasing» Slack, through one
+app, Mr.Chase. All the projects post through the same app, so **every message starts with the
+project's name**. The messages are in English.
 
 The repo is public, and holds nothing but code: the webhook lives in each organization's
 secrets, never here. Being public is what lets every project use it as it uses any other action:
@@ -18,11 +19,12 @@ the security audits of its CI can read it, and Dependabot can tell when a new ve
 
 ## Projects that use it
 
-| Project | Repo |
-|---|---|
-| Control Tower | `Always-Chasing/estrategia-urbana-control-tower` |
+| Project | Repo | Uses |
+|---|---|---|
+| Control Tower | `Always-Chasing/estrategia-urbana-control-tower` | `deploy-notice`, `health-watch`, `pr-rules` |
+| ECO | `Always-Chasing/cabreras-eco` | `pr-rules` |
 
-## Add a project
+## Add the alerts to a project
 
 ### 1. Give the repo the secret
 
@@ -251,6 +253,86 @@ The id of a deployment comes from the list of an environment (`Production` or `s
 
 ```bash
 gh api "repos/Always-Chasing/<repo>/deployments?environment=Production&per_page=5" --jq '.[] | "\(.id) \(.sha[0:7]) \(.created_at)"'
+```
+
+## Check pull requests
+
+`pr-rules` holds every pull request to the Git conventions, the same in every repo. A pull
+request that breaks one fails its «Rules» check, with one message per broken rule that says
+which rule and how to fix it.
+
+| Rule | What it asks |
+|---|---|
+| Title | [Conventional Commits](https://www.conventionalcommits.org): `<type>(<scope>): <summary>`, such as `feat(auth): let a user reset their password`. Squash & Merge makes it the commit |
+| Branch | `<prefix>/<slug>` for a task, `project/<slug>` for an umbrella, in lowercase words joined by hyphens, and never the issue's ID: the body links the issue |
+| Base | The branch the flow expects for that kind of pull request, in the table below |
+| Linear | A task or a hotfix links its issue with a magic word: `Completes DEV-123`, or `Part of DEV-123` when it does not finish it |
+
+A pull request is told apart by its head branch, and the gate is the branch where someone outside
+validates before production (`test`, `staging`):
+
+| Kind | Head | Goes to, with a gate | Goes to, without one |
+|---|---|---|---|
+| Release | The gate | `main` | — |
+| Umbrella | `project/<slug>` | The gate | `main` |
+| Dependabot | `dependabot/…` | The gate | `main` |
+| Hotfix | `hotfix/<slug>` | The gate | `main` |
+| Task | Any other | Its umbrella, the branch it is stacked on, or the gate | Its umbrella, the branch it is stacked on, or `main` |
+
+With `umbrella-only: true`, a task never goes straight to the gate: only through its umbrella.
+An umbrella and a release may carry `Completes` lines, and in a team whose merge to `main` is
+what moves an issue to Done they must: a pull request that gathers others does not inherit their
+issues.
+
+`.github/workflows/pull-request.yml`, with the project's values:
+
+```yaml
+name: Pull request
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  rules:
+    name: Rules
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: Always-Chasing/always-chasing-toolkit/pr-rules@<full SHA of v1> # v1
+        with:
+          gate: test
+```
+
+A workflow of its own, apart from CI, because it has to run again when someone edits the title,
+the body or the base, and nothing else needs to. It reads the pull request from the event: no
+checkout, no token, no secret.
+
+| Input | Default | What it sets |
+|---|---|---|
+| `gate` | empty | The gate. Empty when pull requests go straight to `main` |
+| `umbrella-only` | `false` | `true` when every task enters through its umbrella |
+| `prefixes` | `feature bugfix qafix improvement hotfix refactor docs chore perf test` | The prefixes a task branch may take |
+| `team-keys` | `DEV OPS INT` | The Linear teams a magic word may name, and whose IDs a branch may not carry |
+
+| Project | `gate` | `umbrella-only` |
+|---|---|---|
+| Control Tower | `test` | `false` |
+| ECO | `staging` | `true` |
+| This toolkit | empty | `false`, with `team-keys: INT` |
+
+**Make it required.** In the repo's ruleset for `main` and the gate, *Require status checks to
+pass* → add `Rules` (GitHub Actions). Until then a red «Rules» warns and does not stop the merge.
+
+From a checkout of this repo, against a real pull request or by hand:
+
+```bash
+GITHUB_TOKEN="$(gh auth token)" GATE=test node pr-rules/check.ts --repo Always-Chasing/<repo> --pr <number>
+GATE=test PR_TITLE='feat: add it' PR_BRANCH=feature/add-it PR_BASE=test PR_BODY='Completes DEV-1' node pr-rules/check.ts
 ```
 
 ## The Slack app and its webhook

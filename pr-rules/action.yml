@@ -1,0 +1,48 @@
+# Checks a pull request against the Git conventions of every Always Chasing
+# repo: a Conventional Commits title, a branch with a known prefix and no issue
+# ID, the base its flow expects, and a Linear magic word. The rules are in
+# rules.ts; how a project sets it up, in the README.
+#
+# To edit it: actions pinned to a full commit SHA with the version beside it,
+# and every input reaches the script as environment, never as part of a
+# command — a title is anyone's text.
+name: Pull request rules
+description: Checks a pull request's title, branch, base and Linear link against the Always Chasing Git conventions, and says how to fix what breaks them.
+author: Always Chasing
+
+inputs:
+  gate:
+    description: The branch someone validates in before production, such as test or staging. Empty when pull requests go straight to main.
+    required: false
+    default: ''
+  umbrella-only:
+    description: true when every task reaches the gate through its project/<slug> umbrella; false lets a task go straight to the gate, or to main without one.
+    required: false
+    default: 'false'
+  prefixes:
+    description: The prefixes a task branch may take, separated by spaces.
+    required: false
+    default: feature bugfix qafix improvement hotfix refactor docs chore perf test
+  team-keys:
+    description: The Linear teams whose issues a magic word may name, separated by spaces.
+    required: false
+    default: DEV OPS INT
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: 24
+    - name: Check the pull request
+      shell: bash
+      run: node --disable-warning=ExperimentalWarning "$GITHUB_ACTION_PATH/check.ts"
+      env:
+        GATE: ${{ inputs.gate }}
+        UMBRELLA_ONLY: ${{ inputs.umbrella-only }}
+        PREFIXES: ${{ inputs.prefixes }}
+        TEAM_KEYS: ${{ inputs.team-keys }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        PR_BASE: ${{ github.event.pull_request.base.ref }}
+        PR_BODY: ${{ github.event.pull_request.body }}
