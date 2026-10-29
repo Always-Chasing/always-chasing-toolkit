@@ -1,11 +1,6 @@
-# Mr.Chase, the Slack app every Always Chasing project posts its alerts
-# through: the same name as Always Chasing's agent in Linear, so Always Chasing
-# has one identity across its tools. Created once in the «Always Chasing»
-# workspace and installed to #alerts. It holds no
-# permission beyond its incoming webhook: Slack asks for a bot user to grant
-# that one («Oauth requires bot_user»), but the bot cannot post or read
-# anything on its own, and its token is kept nowhere. The README says how to
-# create it and where its webhook goes.
+# Mr.Chase posts the alerts of every Always Chasing project to #alerts,
+# through its incoming webhook. It holds no other permission: Slack requires
+# a bot user to grant the webhook, but the bot cannot post or read anything.
 _metadata:
   major_version: 2
   minor_version: 1
