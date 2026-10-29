@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { stepsLine, type Message } from '../lib/slack.ts';
 import {
   buildOutcome,
   builtByVercel,
@@ -13,6 +14,7 @@ import {
   pullRequestsIn,
   releaseNotice,
   renderNotice,
+  repeatsEarlierStatus,
   type Notice,
 } from './notice.ts';
 
@@ -204,9 +206,14 @@ describe('the pull requests a range brought', () => {
 const base: Omit<Notice, 'kind'> = {
   project: 'Control Tower',
   environment: 'production',
+  testName: 'test',
+  repoUrl: 'https://github.com/o/r',
   commit: { sha: 'aec4dab3170fc046d3f29d57998e3ce9c57d9832', subject: 'Merge pull request #115 from Always-Chasing/test', url: 'https://github.com/o/r/commit/aec4dab' },
+  change: { number: 115, title: 'chore: release the board to production' },
+  release: true,
   pullRequests: [],
   links: {
+    site: 'https://control-tower.example.com',
     deployment: 'https://project-abc-team.vercel.app',
     logs: 'https://vercel.com/logs',
     migrations: 'https://github.com/o/r/runs/1',
@@ -214,97 +221,138 @@ const base: Omit<Notice, 'kind'> = {
   },
 };
 
+const field = (message: Message, label: string) => message.fields?.find((candidate) => candidate.label === label)?.value ?? '';
+
 describe('every notice', () => {
-  it('starts with the project, since every project posts through the same app', () => {
+  it('titles what happened with the project, and names the release or change and the commit', () => {
     for (const kind of ['build-failed', 'supabase-failed', 'migrations-stalled', 'not-served', 'live'] as const) {
-      assert.ok(renderNotice({ ...base, kind }).startsWith('*Control Tower* · '));
+      const message = renderNotice({ ...base, kind });
+      assert.ok(message.title.startsWith('Control Tower · '), message.title);
+      assert.equal(field(message, 'Release'), '<https://github.com/o/r/pull/115|#115 Release the board to production>');
+      assert.equal(field(message, 'Commit'), '<https://github.com/o/r/commit/aec4dab|aec4dab>');
     }
+  });
+
+  it('is red when something went wrong, and says what happened and what to do', () => {
+    for (const kind of ['build-failed', 'supabase-failed', 'migrations-stalled', 'not-served'] as const) {
+      const message = renderNotice({ ...base, kind });
+      assert.equal(message.tone, 'bad');
+      assert.notEqual(field(message, 'What happened'), '');
+      assert.notEqual(field(message, 'What to do'), '');
+    }
+  });
+
+  it('names a commit nobody opened a pull request for by its subject', () => {
+    const message = renderNotice({ ...base, kind: 'live', change: null, release: false, commit: { ...base.commit, subject: 'fix: a <b> & <!channel>' } });
+    assert.equal(field(message, 'Change'), 'fix: a &lt;b&gt; &amp; &lt;!channel&gt;');
   });
 });
 
 describe('the notice for production', () => {
-  it('says a failed build left the previous version live, with what Vercel said and a link to it', () => {
-    const text = renderNotice({
+  it('says production updated, in green, with every step done and what the release brought', () => {
+    const message = renderNotice({
       ...base,
-      kind: 'build-failed',
-      vercelSays: 'Deployment has failed — run this Vercel CLI command: npx vercel inspect dpl_abc --logs',
+      kind: 'live',
+      pullRequests: [
+        { number: 104, title: 'feat(landing): show the map' },
+        { number: 107, title: 'fix(landing): <b> the pin' },
+      ],
     });
-    contains(text, '🚨 *Deploy failed in production*');
-    contains(text, 'production is still on the previous one');
-    contains(text, 'Vercel: Deployment has failed — run this Vercel CLI command: npx vercel inspect dpl_abc --logs');
-    contains(text, '<https://vercel.com/logs|The deployment on Vercel>');
+    assert.deepEqual(message, {
+      title: 'Control Tower · production updated',
+      tone: 'good',
+      steps: [
+        { state: 'done', label: 'Code built' },
+        { state: 'done', label: 'Database updated' },
+        { state: 'done', label: 'Site live' },
+      ],
+      fields: [
+        { label: 'Release', value: '<https://github.com/o/r/pull/115|#115 Release the board to production>' },
+        { label: 'Commit', value: '<https://github.com/o/r/commit/aec4dab|aec4dab>' },
+      ],
+      list: {
+        label: "What's new (2)",
+        items: ['• <https://github.com/o/r/pull/104|#104> Show the map', '• <https://github.com/o/r/pull/107|#107> &lt;b&gt; the pin'],
+      },
+      footer: ['<https://control-tower.example.com|Open production>'],
+    });
   });
 
-  it('says failed migrations kept the new version off the domain', () => {
-    const text = renderNotice({ ...base, kind: 'supabase-failed', supabaseStep: 'migrations' });
-    contains(text, '🚨 *Migrations failed in production*');
-    contains(text, "Supabase could not apply this commit's migrations");
-    contains(text, 'Vercel did not publish the new version: production is still on the previous one.');
-    contains(text, "<https://github.com/o/r/runs/1|Supabase's check>");
+  it('calls a deploy with nothing new a redeploy', () => {
+    assert.match(renderNotice({ ...base, kind: 'live', change: null, release: false }).note ?? '', /it is a redeploy/);
+  });
+
+  it('says a failed build left the previous version live, with what Vercel said and its log', () => {
+    const message = renderNotice({ ...base, kind: 'build-failed', vercelSays: 'Deployment has failed — run npx vercel inspect dpl_abc --logs' });
+    assert.equal(message.title, 'Control Tower · the production build failed');
+    assert.equal(stepsLine(message.steps ?? []), '❌ Code built → ⏸ Site held back');
+    contains(field(message, 'What happened'), 'production is still on the previous one. Vercel: Deployment has failed — run npx vercel inspect dpl_abc --logs');
+    assert.deepEqual(message.footer, ['<https://vercel.com/logs|Build log in Vercel>']);
+  });
+
+  it('says failed migrations held the new version back', () => {
+    const message = renderNotice({ ...base, kind: 'supabase-failed', supabaseStep: 'migrations' });
+    assert.equal(message.title, 'Control Tower · the production database update failed');
+    assert.equal(stepsLine(message.steps ?? []), '✅ Code built → ❌ Database updated → ⏸ Site held back');
+    contains(field(message, 'What happened'), 'Production is still on the previous version.');
+    assert.deepEqual(message.footer, ["<https://github.com/o/r/runs/1|Supabase's check>"]);
   });
 
   it('says failed buckets came after the migrations, which landed', () => {
-    const text = renderNotice({ ...base, kind: 'supabase-failed', supabaseStep: 'buckets' });
-    contains(text, '🚨 *Buckets failed in production*');
-    contains(text, 'Supabase applied the migrations, but not the buckets in `supabase/config.toml`.');
-    contains(text, 'Vercel did not publish the new version: production is still on the previous one.');
-    lacks(text, 'Migrations failed');
+    const message = renderNotice({ ...base, kind: 'supabase-failed', supabaseStep: 'buckets' });
+    assert.equal(stepsLine(message.steps ?? []), '✅ Code built → ✅ Database updated → ❌ Storage buckets → ⏸ Site held back');
+    contains(field(message, 'What happened'), 'Supabase applied the migrations, but not the buckets in `supabase/config.toml`');
   });
 
   it('blames no step it cannot tell, saying production is held all the same', () => {
     for (const supabaseStep of ['unknown', undefined] as const) {
-      const text = renderNotice({ ...base, kind: 'supabase-failed', supabaseStep });
-      contains(text, "🚨 *Supabase's check failed in production*");
-      contains(text, 'it cannot tell whether the migrations were applied');
-      contains(text, 'Vercel did not publish the new version: production is still on the previous one.');
-      lacks(text, 'Migrations failed');
+      const message = renderNotice({ ...base, kind: 'supabase-failed', supabaseStep });
+      assert.equal(message.title, "Control Tower · Supabase's check failed for production");
+      contains(field(message, 'What happened'), 'it cannot tell whether the migrations were applied');
+      lacks(stepsLine(message.steps ?? []), 'Database');
     }
   });
 
   it('says a stalled Supabase holds the release, and how to skip the wait', () => {
-    const text = renderNotice({ ...base, kind: 'migrations-stalled', waitedMinutes: 30 });
-    contains(text, '🚨 *Production held back*');
-    contains(text, '30 minutes');
-    contains(text, '«Force Promote»');
+    const message = renderNotice({ ...base, kind: 'migrations-stalled', waitedMinutes: 30 });
+    assert.equal(message.title, 'Control Tower · production deploy is stuck');
+    assert.equal(stepsLine(message.steps ?? []), '✅ Code built → ⏳ Database updating → ⏸ Site held back');
+    contains(field(message, 'What happened'), '30 minutes');
+    contains(field(message, 'What to do'), '«Force Promote»');
   });
 
   it('says the domain never took the new version although the migrations landed', () => {
-    const text = renderNotice({ ...base, kind: 'not-served', waitedMinutes: 5 });
-    contains(text, '🚨 *Production was not published*');
-    contains(text, '5 minutes later the domain of production still serves another version');
-  });
-
-  it('lists what a release brought', () => {
-    const text = renderNotice({
-      ...base,
-      kind: 'live',
-      pullRequests: [
-        { number: 104, title: 'feat(landing): a' },
-        { number: 107, title: 'fix(landing): b' },
-      ],
-    });
-    contains(text, '*Control Tower* · ✅ *Production published* — <https://github.com/o/r/commit/aec4dab|aec4dab>');
-    contains(text, 'Brings 2 PRs:\n• #104 feat(landing): a\n• #107 fix(landing): b');
-  });
-
-  it('calls a release with nothing new a redeploy', () => {
-    contains(renderNotice({ ...base, kind: 'live' }), 'it is a redeploy');
+    const message = renderNotice({ ...base, kind: 'not-served', waitedMinutes: 5 });
+    assert.equal(message.title, 'Control Tower · production did not go live');
+    assert.equal(stepsLine(message.steps ?? []), '✅ Code built → ✅ Database updated → ❌ Site live');
+    contains(field(message, 'What happened'), '5 minutes later the domain of production still serves another version');
   });
 });
 
 describe('the notice for test', () => {
-  const test = { ...base, environment: 'test' as const, commit: { ...base.commit, subject: 'fix(land-use): stop saying the team looks it up (#113)' } };
+  const test: Omit<Notice, 'kind'> = {
+    ...base,
+    environment: 'test',
+    change: { number: 113, title: 'fix(land-use): stop saying the team looks it up' },
+    release: false,
+    links: { ...base.links, site: 'https://test.control-tower.example.com' },
+  };
 
-  it('says test is ready to try, naming the pull request in its heading', () => {
-    const text = renderNotice({ ...test, kind: 'live', pullRequests: [{ number: 113, title: 'fix(land-use): stop saying the team looks it up' }] });
-    contains(text, '✅ *`test` ready*');
-    contains(text, '(#113)');
-    contains(text, 'ready to try');
-    lacks(text, 'Brings');
+  it('says test is ready to try, in blue, naming its change and nothing more', () => {
+    const message = renderNotice({ ...test, kind: 'live', pullRequests: [{ number: 113, title: 'fix(land-use): stop saying the team looks it up' }] });
+    assert.equal(message.title, 'Control Tower · test is ready to try');
+    assert.equal(message.tone, 'ready');
+    assert.equal(field(message, 'Change'), '<https://github.com/o/r/pull/113|#113 Stop saying the team looks it up>');
+    assert.equal(message.list, undefined);
+    assert.deepEqual(message.footer, ['<https://test.control-tower.example.com|Open test>']);
   });
 
-  it('lists the pull requests when one deploy brought several', () => {
-    const text = renderNotice({
+  it('calls the gate by its branch', () => {
+    assert.equal(renderNotice({ ...test, testName: 'staging', kind: 'live' }).title, 'Control Tower · staging is ready to try');
+  });
+
+  it('lists what entered with it when one deploy brought more than its change', () => {
+    const message = renderNotice({
       ...test,
       kind: 'live',
       pullRequests: [
@@ -312,38 +360,46 @@ describe('the notice for test', () => {
         { number: 113, title: 'b' },
       ],
     });
-    contains(text, 'Brings 2 PRs:');
+    assert.equal(message.list?.label, "What's new (2)");
   });
 
   it('warns that failed migrations left the new code over the old schema', () => {
-    const text = renderNotice({ ...test, kind: 'supabase-failed', supabaseStep: 'migrations' });
-    contains(text, '🚨 *Migrations failed in `test`*');
-    contains(text, 'the new code is already live there');
+    const message = renderNotice({ ...test, kind: 'supabase-failed', supabaseStep: 'migrations' });
+    assert.equal(message.title, 'Control Tower · the test database update failed');
+    assert.equal(stepsLine(message.steps ?? []), '✅ Code built → ❌ Database updated → ✅ Site live');
+    contains(field(message, 'What happened'), 'the new code is already live in `test`');
   });
 
   it('warns that failed buckets left the new code without them', () => {
-    const text = renderNotice({ ...test, kind: 'supabase-failed', supabaseStep: 'buckets' });
-    contains(text, '🚨 *Buckets failed in `test`*');
-    contains(text, 'Supabase applied the migrations to `test`');
-    contains(text, 'it may fail wherever it uses them');
+    const message = renderNotice({ ...test, kind: 'supabase-failed', supabaseStep: 'buckets' });
+    contains(field(message, 'What happened'), 'it may fail wherever it uses them');
   });
 
   it('says nothing of the migrations when the step is unknown, nor that production is held', () => {
-    const text = renderNotice({ ...test, kind: 'supabase-failed', supabaseStep: 'unknown' });
-    contains(text, "🚨 *Supabase's check failed in `test`*");
-    contains(text, 'it cannot tell whether the migrations of `test` were applied');
-    lacks(text, 'production');
+    const message = renderNotice({ ...test, kind: 'supabase-failed', supabaseStep: 'unknown' });
+    contains(field(message, 'What happened'), 'it cannot tell whether the migrations were applied');
+    lacks(JSON.stringify(message), 'roduction');
   });
 });
 
-describe('text taken from outside', () => {
-  it('is escaped, so a subject cannot become a link or a mention', () => {
-    const text = renderNotice({ ...base, kind: 'live', commit: { ...base.commit, subject: 'fix: <b> & <!channel>' } });
-    contains(text, 'fix: &lt;b&gt; &amp; &lt;!channel&gt;');
-    lacks(text, '<!channel>');
+describe('the same report twice', () => {
+  const statuses = [
+    { id: 20950890311, state: 'success' },
+    { id: 20950822520, state: 'success' },
+    { id: 20950800000, state: 'in_progress' },
+  ];
+
+  it('is told once: Control Tower\'s 7425348273 got two successes', () => {
+    assert.equal(repeatsEarlierStatus(statuses, 20950822520), false);
+    assert.equal(repeatsEarlierStatus(statuses, 20950890311), true);
   });
 
-  it('escapes the project name too', () => {
-    assert.ok(renderNotice({ ...base, project: 'A <b> & co', kind: 'live' }).startsWith('*A &lt;b&gt; &amp; co* · '));
+  it('is news when the state changed, such as a held release published later', () => {
+    assert.equal(repeatsEarlierStatus([{ id: 3, state: 'success' }, { id: 2, state: 'failure' }], 3), false);
+  });
+
+  it('is not judged for a status that is not final, or that is not there', () => {
+    assert.equal(repeatsEarlierStatus(statuses, 20950800000), false);
+    assert.equal(repeatsEarlierStatus(statuses, 1), false);
   });
 });
