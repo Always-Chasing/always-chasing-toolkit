@@ -118,7 +118,7 @@ jobs:
       deployments: read
       pull-requests: read
     steps:
-      - uses: Always-Chasing/always-chasing-toolkit/deploy-notice@<full SHA of the version> # v1.2.0
+      - uses: Always-Chasing/always-chasing-toolkit/deploy-notice@<full SHA of the version> # v1.3.0
         with:
           project: Example
           webhook-url: ${{ secrets.SLACK_ALERTS_WEBHOOK_URL }}
@@ -139,7 +139,7 @@ jobs:
       statuses: read
       pull-requests: read
     steps:
-      - uses: Always-Chasing/always-chasing-toolkit/deploy-notice@<full SHA of the version> # v1.2.0
+      - uses: Always-Chasing/always-chasing-toolkit/deploy-notice@<full SHA of the version> # v1.3.0
         with:
           project: Example
           webhook-url: ${{ secrets.SLACK_ALERTS_WEBHOOK_URL }}
@@ -243,7 +243,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: health-checks.json
           sparse-checkout-cone-mode: false
-      - uses: Always-Chasing/always-chasing-toolkit/health-watch@<full SHA of the version> # v1.2.0
+      - uses: Always-Chasing/always-chasing-toolkit/health-watch@<full SHA of the version> # v1.3.0
         with:
           project: Example
           webhook-url: ${{ secrets.SLACK_ALERTS_WEBHOOK_URL }}
@@ -342,7 +342,7 @@ jobs:
       # Only a release reads anything: what it releases.
       pull-requests: read
     steps:
-      - uses: Always-Chasing/always-chasing-toolkit/pr-rules@<full SHA of the version> # v1.2.0
+      - uses: Always-Chasing/always-chasing-toolkit/pr-rules@<full SHA of the version> # v1.3.0
         with:
           gate: test
 ```
@@ -476,7 +476,7 @@ moves, a pin that says `v1` beside an older SHA stops being true, and zizmor's
 one as a pull request.
 
 ```bash
-git ls-remote https://github.com/Always-Chasing/always-chasing-toolkit 'refs/tags/v1.2.0^{}'
+git ls-remote https://github.com/Always-Chasing/always-chasing-toolkit 'refs/tags/v1.3.0^{}'
 ```
 
 ## Develop
