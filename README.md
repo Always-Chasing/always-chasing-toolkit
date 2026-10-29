@@ -26,7 +26,7 @@ the security audits of its CI can read it, and Dependabot can tell when a new ve
 | Project | Repo | Uses |
 |---|---|---|
 | Control Tower | `Always-Chasing/estrategia-urbana-control-tower` | `deploy-notice`, `health-watch`, `pr-rules` |
-| ECO | `Always-Chasing/cabreras-eco` | `pr-rules` |
+| ECO | `Always-Chasing/cabreras-eco` | `deploy-notice`, `health-watch` (hourly), `pr-rules` |
 
 ## Add the alerts to a project
 
@@ -418,7 +418,7 @@ the secret. Saving an organization secret needs the `admin:org` scope, once:
 `gh auth refresh -h github.com -s admin:org`.
 
 ```bash
-if pbpaste | grep -qxE 'https://hooks\.slack\.com/services/[A-Za-z0-9/]+'; then SLACK_WEBHOOK_URL="$(pbpaste)" PROJECT="Always Chasing" node health-watch/watch.ts --test && pbpaste | gh secret set SLACK_ALERTS_WEBHOOK_URL --org Always-Chasing --visibility selected --repos estrategia-urbana-control-tower && pbcopy < /dev/null; else echo 'The clipboard holds no Slack webhook: the secret was not touched'; fi
+if pbpaste | grep -qxE 'https://hooks\.slack\.com/services/[A-Za-z0-9/]+'; then SLACK_WEBHOOK_URL="$(pbpaste)" PROJECT="Always Chasing" node health-watch/watch.ts --test && pbpaste | gh secret set SLACK_ALERTS_WEBHOOK_URL --org Always-Chasing --visibility selected --repos estrategia-urbana-control-tower,cabreras-eco && pbcopy < /dev/null; else echo 'The clipboard holds no Slack webhook: the secret was not touched'; fi
 ```
 
 `--repos` sets the whole list of repos that see the secret. When the secret changes, list every
