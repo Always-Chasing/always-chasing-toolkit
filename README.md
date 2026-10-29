@@ -12,15 +12,9 @@ Chasing» Slack, through one app, Mr.Chase:
 All the projects post through the same app, so **every message starts with the project's name**.
 The messages are in English.
 
-The repo is private. Its actions are open to the other repos of the organization: *Settings →
-Actions → General → Access* is set to *Accessible from repositories in the organization*:
-
-```bash
-gh api -X PUT repos/Always-Chasing/always-chasing-toolkit/actions/permissions/access -f access_level=organization
-```
-
-That setting shares the actions without opening the rest of an operations repo to the runs of
-every other repo, which is why the toolkit lives in a repo of its own.
+The repo is public, and holds nothing but code: the webhook lives in each organization's
+secrets, never here. Being public is what lets every project use it as it uses any other action:
+the security audits of its CI can read it, and Dependabot can tell when a new version is out.
 
 ## Projects that use it
 
