@@ -7,7 +7,11 @@ and Supabase, and the check that keeps every pull request within the Git convent
 |---|---|
 | [`deploy-notice`](deploy-notice/action.yml) | Tells whether a deploy of `test` or production went live: Vercel's build, Supabase's migrations, and whether the domain already serves the new version. When it did not go live, it says why |
 | [`health-watch`](health-watch/action.yml) | Tells what started failing in production, read from the project's `/api/health` every half hour, and reminds every 6 hours while it keeps failing. It also speaks when production does not answer at all |
-| [`pr-rules`](pr-rules/action.yml) | Fails a pull request whose title, branch, base or link to Linear breaks the conventions, and says how to fix it |
+| [`pr-rules`](pr-rules/action.yml) | Fails a pull request whose title, branch, base or link to Linear breaks the conventions, and says how to fix it. A release must complete every issue it releases |
+
+And one command, [`release-pr`](release-pr/draft.ts), that drafts the release pull request of a
+repo with a gate: what entered `test` since the last release, and a `Completes` line for each
+issue, compared with the issues in In Test.
 
 Both alerts post to `#alerts`, the private channel of the «Always Chasing» Slack, through one
 app, Mr.Chase. All the projects post through the same app, so **every message starts with the
@@ -266,7 +270,7 @@ which rule and how to fix it.
 | Title | [Conventional Commits](https://www.conventionalcommits.org): `<type>(<scope>): <summary>`, such as `feat(auth): let a user reset their password`. Squash & Merge makes it the commit |
 | Branch | `<prefix>/<slug>` for a task, `project/<slug>` for an umbrella, in lowercase words joined by hyphens, and never the issue's ID: the body links the issue |
 | Base | The branch the flow expects for that kind of pull request, in the table below |
-| Linear | A task or a hotfix links its issue with a magic word: `Completes DEV-123`, or `Part of DEV-123` when it does not finish it |
+| Linear | A task or a hotfix links its issue with a magic word: `Completes DEV-123`, or `Part of DEV-123` when it does not finish it. A release completes every issue a pull request in it finishes — see [Draft the release](#draft-the-release) |
 
 A pull request is told apart by its head branch, and the gate is the branch where someone outside
 validates before production (`test`, `staging`):
@@ -302,6 +306,8 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      # Only a release reads anything: what it releases.
+      pull-requests: read
     steps:
       - uses: Always-Chasing/always-chasing-toolkit/pr-rules@<full SHA of v1> # v1
         with:
@@ -310,7 +316,7 @@ jobs:
 
 A workflow of its own, apart from CI, because it has to run again when someone edits the title,
 the body or the base, and nothing else needs to. It reads the pull request from the event: no
-checkout, no token, no secret.
+checkout and no secret. Only a release reads GitHub, with the job's own token.
 
 | Input | Default | What it sets |
 |---|---|---|
@@ -318,6 +324,7 @@ checkout, no token, no secret.
 | `umbrella-only` | `false` | `true` when every task enters through its umbrella |
 | `prefixes` | `feature bugfix qafix improvement hotfix refactor docs chore perf test` | The prefixes a task branch may take |
 | `team-keys` | `DEV OPS INT` | The Linear teams a magic word may name, and whose IDs a branch may not carry |
+| `github-token` | The job's token | Reads what a release releases |
 
 | Project | `gate` | `umbrella-only` |
 |---|---|---|
@@ -334,6 +341,60 @@ From a checkout of this repo, against a real pull request or by hand:
 GITHUB_TOKEN="$(gh auth token)" GATE=test node pr-rules/check.ts --repo Always-Chasing/<repo> --pr <number>
 GATE=test PR_TITLE='feat: add it' PR_BRANCH=feature/add-it PR_BASE=test PR_BODY='Completes DEV-1' node pr-rules/check.ts
 ```
+
+## Draft the release
+
+In team DEV, entering the gate moves an issue to In Test, and **only the merge to `main` moves it
+to Done**. A pull request that gathers others does not inherit their issues, so the release names
+every issue that entered the gate since the previous release, one `Completes` line each. One
+missing line, and that issue never reaches Done on its own.
+
+`release-pr/draft.ts` writes that body. It reads what the gate has and `main` does not —
+`git log origin/main..origin/test`—: each pull request squashed into the gate or into an umbrella
+(`… (#N)`), and each umbrella that entered it (`Merge pull request #N from …`). From their bodies
+it takes the magic words:
+
+- **One row per pull request that entered the gate itself**: umbrellas, tasks, hotfixes and
+  Dependabot. Its words come from the title; rewrite them as what production gets.
+- **One `Completes` line per issue that some pull request finishes**, umbrellas and their tasks
+  alike.
+- **What only a `Part of` names stays open**, listed with bare IDs, which link nothing.
+
+Then it compares that list with the issues of the team in In Test that a pull request of the repo
+links, and says which differ: one the release completes that is not in In Test, or one in In Test
+that no pull request completes. It exits with 1 when they differ, after writing the body.
+
+From the project's checkout, with a clone of this repo beside it:
+
+```bash
+GITHUB_TOKEN="$(gh auth token)" \
+LINEAR_API_KEY="$(security find-generic-password -s always-chasing-linear-api -w)" \
+  node ~/projects/always-chasing-toolkit/release-pr/draft.ts --gate test > release.md
+```
+
+Then rewrite each row as what production gets, add what is worth knowing before production, and
+open it:
+
+```bash
+gh pr create --base main --head test --title "chore: release … to production" --body-file release.md
+```
+
+| Option | Default | What it sets |
+|---|---|---|
+| `--gate` | `test` | The gate; ECO's is `staging` |
+| `--repo` | The checkout's `origin` | The repo, as `<owner>/<name>` |
+| `--team` | `DEV` | The team whose In Test it compares with |
+| `--team-keys` | `DEV OPS INT` | The teams whose magic words count |
+
+**The Linear key never leaves the Mac.** It is read from the Keychain into the command's
+environment and goes only to Linear's API. Without it, the comparison is left out. A key of
+Linear's with read access is enough.
+
+**The «Rules» check holds the release to it.** `pr-rules` fails a release that does not complete
+an issue some pull request in it finishes, reading GitHub with the job's token, and warns of one it
+completes that no pull request finishes. It does not read Linear. An issue that should not reach
+Done with this release is fixed where it was promised: edit the body of the pull request that
+finished it to say `Part of`, and the check runs again on the next edit of the release.
 
 ## The Slack app and its webhook
 
@@ -387,7 +448,7 @@ npm run check   # the types, then the tests
   no namespaces, no parameter properties. `tsconfig.json` refuses the rest.
 - **Third-party actions pinned to a full commit SHA**, with the version beside it.
 - **Every input reaches a script as environment**, never as part of a command.
-- **The webhook is the one secret.** Nothing prints it: an error names the variable, never its
-  value.
+- **The webhook is the one secret in Actions, and the Linear key the one on a Mac.** Nothing prints
+  them: an error names the variable, never its value.
 - **The messages are in English and start with the project's name.** The rules that write them
   are pure functions, tested on their own; the scripts ask, post and remember.
