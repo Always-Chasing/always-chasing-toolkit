@@ -69,6 +69,24 @@ export function builtByVercel(status: { state: string; description?: string | nu
 }
 
 /**
+ * The deployment that took over from this one, if any: a newer one of the
+ * same environment —later on the same branch, so it holds this one's
+ * commits— that Vercel built (`builtByVercel`). Whatever Vercel reports about
+ * a deployment once another took over is nobody's alert: on 16 October 2026 it
+ * marked Control Tower's held production deployment of 14 October as
+ * published, three releases late, and the notice read the failed Supabase
+ * check of that commit again and posted it as news. A newer deployment still
+ * building, or whose build failed, took nothing over: the environment is still
+ * on this one. Of several, the first listed.
+ */
+export function supersededBy<T extends { id: number; final: { state: string; description?: string | null } | undefined }>(
+  deployment: { id: number },
+  environment: readonly T[],
+): T | undefined {
+  return environment.find((other) => other.id > deployment.id && other.final !== undefined && builtByVercel(other.final));
+}
+
+/**
  * Supabase's verdict on the migrations of a commit, from its «Supabase
  * Preview» check run. A run that has not finished — or has not been created
  * yet — is `pending`: the caller keeps asking. A skipped or neutral run means

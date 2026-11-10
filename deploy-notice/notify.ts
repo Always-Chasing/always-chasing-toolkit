@@ -6,8 +6,11 @@
  *     node deploy-notice/notify.ts --repo <owner>/<name> --deployment <id> --dry-run
  *   … node deploy-notice/notify.ts --repo <owner>/<name> --release <sha> --dry-run
  *
- * The deploy notice (`--deployment`, or `DEPLOYMENT_ID`) asks three questions,
- * in order, and stops at the first bad answer:
+ * The deploy notice (`--deployment`, or `DEPLOYMENT_ID`) first asks whether a
+ * newer deployment of the same environment already took over: Vercel can
+ * report a deployment again days later, and what it says then is nobody's
+ * alert. If none did, it asks three questions, in order, and stops at the
+ * first bad answer:
  *
  *   1. Did Vercel build it? — the state of the GitHub deployment Vercel created.
  *   2. Did Supabase apply the migrations of that commit, and the buckets
@@ -37,7 +40,9 @@
  *
  * The answers become one notice (`notice.ts`), posted to the Slack webhook —
  * or printed, with `--dry-run`, which is how a notice is tried against a real
- * deploy without posting anything.
+ * deploy without posting anything. An old deploy has almost always been taken
+ * over since, so trying one takes `--even-if-superseded` too, which only works
+ * with `--dry-run`.
  *
  * Plain Node, no dependencies: the action runs it without installing anything.
  * Nothing here needs Vercel or Supabase credentials: everything is read from
@@ -63,6 +68,7 @@ import {
   releaseNotice,
   renderNotice,
   repeatsEarlierStatus,
+  supersededBy,
   type DeployEnvironment,
   type EnvironmentNames,
   type Notice,
@@ -291,10 +297,15 @@ async function statusesOf(config: Config, id: number): Promise<DeploymentStatus[
   return list(await github(`/repos/${config.repo}/deployments/${id}/statuses?per_page=100`), 'the statuses of a deployment').map(toDeploymentStatus);
 }
 
-/** A deployment and the last final state Vercel reported for it, skipping the `inactive` GitHub sets once a newer one exists. */
+/** The last final status Vercel reported for a deployment, skipping the `inactive` GitHub sets once a newer one exists. */
+async function finalStatusOf(config: Config, id: number): Promise<DeploymentStatus | undefined> {
+  return (await statusesOf(config, id)).find((status) => buildOutcome(status.state) !== null);
+}
+
+/** A deployment and the last final state Vercel reported for it. */
 async function loadDeployment(config: Config, id: number): Promise<DeploymentFacts> {
   const deployment = toDeployment(await github(`/repos/${config.repo}/deployments/${id}`));
-  const final = (await statusesOf(config, id)).find((status) => buildOutcome(status.state) !== null);
+  const final = await finalStatusOf(config, id);
   if (!final) fail(`deployment ${id} has no final status yet`);
   const url = final.environmentUrl ?? final.targetUrl ?? fail(`deployment ${id} has no URL`);
   return {
@@ -432,8 +443,19 @@ async function waitUntilServed(config: Config, deployment: DeploymentFacts, doma
 
 /** Whether Vercel built a deployment — published it, or held it back — from the last final status it reported. */
 async function wasBuilt(config: Config, id: number): Promise<boolean> {
-  const final = (await statusesOf(config, id)).find((status) => buildOutcome(status.state) !== null);
+  const final = await finalStatusOf(config, id);
   return final !== undefined && builtByVercel(final);
+}
+
+/**
+ * The newer deployment of the same environment that took over from this one,
+ * if any. Only the newer ones are asked for their statuses: for the deploy
+ * that just happened there are none, or one still building.
+ */
+async function takenOverBy(config: Config, deployment: DeploymentFacts): Promise<Deployment | undefined> {
+  const newer = (await deploymentsOf(config, deployment.githubEnvironment)).filter((d) => d.id > deployment.id);
+  const reported = await Promise.all(newer.map(async (d) => ({ ...d, final: await finalStatusOf(config, d.id) })));
+  return supersededBy(deployment, reported);
 }
 
 /**
@@ -518,7 +540,7 @@ async function deliver(notice: Notice, dryRun: boolean): Promise<void> {
   console.log('\ndeploy-notice ✓  posted to Slack');
 }
 
-async function notifyDeployment(config: Config, id: number, statusId: number | null, dryRun: boolean): Promise<void> {
+async function notifyDeployment(config: Config, id: number, statusId: number | null, dryRun: boolean, evenIfSuperseded: boolean): Promise<void> {
   if (statusId !== null && repeatsEarlierStatus(await statusesOf(config, id), statusId)) {
     console.log(`deploy-notice  deployment ${id} already reported this state: it was told then`);
     return;
@@ -528,6 +550,14 @@ async function notifyDeployment(config: Config, id: number, statusId: number | n
   const domain = environment === null ? null : config.domains[environment];
   if (environment === null || domain === null) {
     console.log(`deploy-notice  deployment ${id} is a ${deployment.githubEnvironment} one: nothing to tell`);
+    return;
+  }
+  const newer = evenIfSuperseded ? undefined : await takenOverBy(config, deployment);
+  if (newer !== undefined) {
+    console.log(
+      `deploy-notice  deployment ${id} (${deployment.sha.slice(0, 7)}) was taken over by ${newer.id} (${newer.sha.slice(0, 7)}): ` +
+        `Vercel's ${deployment.state} on it now is nobody's alert`,
+    );
     return;
   }
   const commit = await commitFacts(config, deployment.sha);
@@ -649,11 +679,15 @@ async function main(): Promise<void> {
       deployment: { type: 'string' },
       release: { type: 'string' },
       'dry-run': { type: 'boolean', default: false },
+      'even-if-superseded': { type: 'boolean', default: false },
       payload: { type: 'boolean', default: false },
     },
   });
   const config = configure(values.repo);
   const dryRun = values['dry-run'] === true || setting('DRY_RUN') === 'true';
+  const evenIfSuperseded = values['even-if-superseded'] === true;
+  // Posting about a deploy another took over is exactly the false alarm the question prevents.
+  if (evenIfSuperseded && !dryRun) fail('--even-if-superseded is for trying a notice against an old deploy: use it with --dry-run');
 
   const release = values.release ?? setting('RELEASE_SHA');
   if (release) return watchRelease(config, release, dryRun);
@@ -662,7 +696,7 @@ async function main(): Promise<void> {
   if (!Number.isInteger(id) || id <= 0) fail('which deploy? Pass --deployment <id> or --release <sha>, or set DEPLOYMENT_ID or RELEASE_SHA.');
   // The status that started the run; none when a person asked for the notice again.
   const statusId = Number(setting('DEPLOYMENT_STATUS_ID') ?? NaN);
-  return notifyDeployment(config, id, Number.isInteger(statusId) ? statusId : null, dryRun);
+  return notifyDeployment(config, id, Number.isInteger(statusId) ? statusId : null, dryRun, evenIfSuperseded);
 }
 
 main().catch((error: unknown) => {
