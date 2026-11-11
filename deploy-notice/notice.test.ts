@@ -15,6 +15,7 @@ import {
   releaseNotice,
   renderNotice,
   repeatsEarlierStatus,
+  supersededBy,
   type Notice,
 } from './notice.ts';
 
@@ -70,6 +71,36 @@ describe('which deploys Vercel built', () => {
     assert.equal(builtByVercel({ state: 'failure', description: null }), false);
     assert.equal(builtByVercel({ state: 'error' }), false);
     assert.equal(builtByVercel({ state: 'pending', description: 'Vercel is deploying your app' }), false);
+  });
+});
+
+describe('a deployment a newer one took over', () => {
+  const published = { state: 'success', description: 'Deployment has completed' };
+  const held = { state: 'failure', description: 'Checks for Deployment have failed' };
+  const brokenBuild = { state: 'failure', description: 'Deployment has failed' };
+
+  it('is the held release of 14 October 2026, which Vercel marked as published three releases late', () => {
+    const production = [
+      { id: 7101479627, sha: 'bca4b78', final: published },
+      { id: 7080204514, sha: '7ce536e', final: published },
+      { id: 7079315544, sha: 'b4b311d', final: published },
+      { id: 7071071476, sha: '5465d59', final: published },
+      { id: 6984871257, sha: '8b90073', final: published },
+    ];
+    assert.equal(supersededBy({ id: 7071071476 }, production)?.sha, 'bca4b78');
+  });
+
+  it('counts a newer one the migrations check held back: it may have been published by hand', () => {
+    assert.equal(supersededBy({ id: 1 }, [{ id: 2, final: held }])?.id, 2);
+  });
+
+  it('is not the latest one of its environment, whatever came before it', () => {
+    assert.equal(supersededBy({ id: 2 }, [{ id: 2, final: published }, { id: 1, final: published }]), undefined);
+    assert.equal(supersededBy({ id: 2 }, []), undefined);
+  });
+
+  it('is not one whose newer deployment is still building, or failed its build', () => {
+    assert.equal(supersededBy({ id: 1 }, [{ id: 3, final: undefined }, { id: 2, final: brokenBuild }]), undefined);
   });
 });
 

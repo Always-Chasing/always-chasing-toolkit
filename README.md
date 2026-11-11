@@ -162,7 +162,10 @@ request from it. The other inputs, with their defaults, are in
 `test`, or the release that reached production and every pull request it brought, as its own
 table lists them. That reading needs `pull-requests: read`; without it, a notice still goes out,
 naming the commit instead. Vercel may report the same deployment twice: only the first report of
-each state is told. The notices themselves are in [`deploy-notice/notice.ts`](deploy-notice/notice.ts):
+each state is told. **And it may report one days later**: once a newer deployment of the same
+environment was built —published or held back—, nothing is told about the older one, because the
+environment is no longer on it. A newer one still building, or whose build failed, does not count.
+The notices themselves are in [`deploy-notice/notice.ts`](deploy-notice/notice.ts):
 
 | Title | Steps | What happened |
 |---|---|---|
@@ -285,6 +288,10 @@ GITHUB_TOKEN="$(gh auth token)" PROJECT=Example PRODUCTION_URL=https://example.c
 PROJECT=Example PRODUCTION_URL=https://example.com \
   node health-watch/watch.ts --checks <path to the project's checks file> --dry-run --url https://<preview>.vercel.app
 ```
+
+Against the latest deployment of an environment, the deploy notice gives the notice it would give
+today. Against an older one it is almost always quiet, because a newer one took over: add
+`--even-if-superseded` to try it anyway. It only works with `--dry-run`.
 
 The id of a deployment comes from the list of an environment (`Production` or `staging`):
 
