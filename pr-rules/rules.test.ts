@@ -115,6 +115,18 @@ describe('a task', () => {
     passes({ ...task, branch: 'feature/devops-2' }, gated);
   });
 
+  it('moves a badly named branch to a new one, because renaming it closes the pull request', () => {
+    const messages = [
+      breaks({ ...task, branch: 'fix/weekly-projection' }, gated, 'Branch'),
+      breaks({ ...task, branch: 'feature/dev-123-weekly-projection' }, gated, 'Branch'),
+      breaks({ ...umbrella, branch: 'project/Weekly_Estimate' }, gated, 'Branch'),
+    ];
+    for (const message of messages) {
+      assert.match(message, /Don’t rename it on GitHub: that closes this pull request\./);
+      assert.match(message, /git push origin HEAD:<new-name>/);
+    }
+  });
+
   it('links its issue with a closing or non-closing magic word, by ID or URL', () => {
     for (const body of ['Part of DEV-12', 'fixes OPS-7', 'Completes https://linear.app/always-chasing-ops/issue/DEV-123/weekly-projection']) {
       passes({ ...task, body }, gated);
