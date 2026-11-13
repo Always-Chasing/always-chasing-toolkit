@@ -90,7 +90,11 @@ function basesFor(kind: Kind, rules: Rules): { allowed: (base: string) => boolea
   }
 }
 
-const RENAME = 'Rename it on GitHub (Branches → ⋯ → Rename branch): the pull request follows it.';
+// Renaming the branch on GitHub closes the pull request: GitHub moves only the
+// pull requests whose base is the renamed branch, never the one whose head it is.
+const RENAME =
+  'Don’t rename it on GitHub: that closes this pull request. Push the same commit to a branch with the right ' +
+  'name (git push origin HEAD:<new-name>), open the pull request from it and close this one.';
 
 export function brokenRules(pr: PullRequest, rules: Rules): string[] {
   const broken: string[] = [];
